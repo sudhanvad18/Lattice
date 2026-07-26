@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment (secrets)
+.env
+.env.local
+
+# Data (generated/persisted locally)
+data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Node (dashboard)
+packages/dashboard/node_modules/
+packages/dashboard/.next/
+
+# OS
+.DS_Store
+Thumbs.db
