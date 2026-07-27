@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "lattice": {
+      "command": "python",
+      "args": ["-m", "lattice_mcp.server"],
+      "env": {
+        "LATTICE_DEFAULT_PROVIDER": "ollama",
+        "LATTICE_OLLAMA_MODEL": "llama3.2"
+      }
+    }
+  }
+}

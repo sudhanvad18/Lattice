@@ -35,7 +35,13 @@ class KnowledgeGraphBackend(ABC):
     def add_relation(self, relation: Relation) -> None: ...
 
     @abstractmethod
+    def remove_entity(self, entity_id: str) -> None: ...
+
+    @abstractmethod
     def get_entity(self, entity_id: str) -> Optional[Entity]: ...
+
+    @abstractmethod
+    def get_all_entities(self) -> list[Entity]: ...
 
     @abstractmethod
     def get_entities_by_type(self, entity_type: str) -> list[Entity]: ...
@@ -90,6 +96,14 @@ class NetworkXBackend(KnowledgeGraphBackend):
             properties=entity.properties,
         )
         self._entities[entity.id] = entity
+
+    def remove_entity(self, entity_id: str) -> None:
+        if entity_id in self._graph:
+            self._graph.remove_node(entity_id)
+        self._entities.pop(entity_id, None)
+
+    def get_all_entities(self) -> list[Entity]:
+        return list(self._entities.values())
 
     def add_relation(self, relation: Relation) -> None:
         if relation.source_id not in self._graph:
