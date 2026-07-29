@@ -5,9 +5,15 @@ from lattice.evaluation.engine import (
     EvalTask,
     EvaluationEngine,
 )
+from lattice.evaluation.citation_utility import (
+    CitationUtilityEvaluator,
+    CitationUtilityScore,
+)
 
 __all__ = [
     "BenchmarkReport",
+    "CitationUtilityEvaluator",
+    "CitationUtilityScore",
     "DEMO_BENCHMARK_TASKS",
     "EvalResult",
     "EvalTask",

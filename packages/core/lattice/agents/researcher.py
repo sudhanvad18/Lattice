@@ -7,6 +7,10 @@ with citations back to source chunks and KG entities.
 
 The Researcher does NOT generate new content — it synthesizes and
 organizes existing knowledge from the knowledge base.
+
+With tools enabled, the Researcher autonomously decides what to search
+for, executes multiple queries, and synthesizes the combined results
+into a richer research brief.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import structlog
 
 from lattice.agents.base import BaseAgent
 from lattice.agents.state import AgentRole, AgentState, Artifact
+from lattice.agents.tools import ToolRegistry, ToolResult
 from lattice.graph.engine import KnowledgeGraphBackend
 from lattice.inference.provider import LLMProvider
 from lattice.retrieval.vector_store import VectorStore
@@ -35,10 +40,11 @@ class ResearcherAgent(BaseAgent):
         provider: LLMProvider,
         vector_store: VectorStore | None = None,
         kg_backend: KnowledgeGraphBackend | None = None,
+        tool_registry: ToolRegistry | None = None,
         top_k: int = 8,
         **kwargs,
     ) -> None:
-        super().__init__(provider, **kwargs)
+        super().__init__(provider, tool_registry=tool_registry, **kwargs)
         self._vector_store = vector_store
         self._kg_backend = kg_backend
         self._top_k = top_k
@@ -48,9 +54,10 @@ class ResearcherAgent(BaseAgent):
         return """You are a Research Specialist in an autonomous agent team. Your job is to:
 
 1. Analyze the task and identify what information is needed
-2. Synthesize retrieved documents and knowledge graph data into a structured research brief
-3. Cite your sources precisely (chunk IDs and entity IDs)
-4. Flag gaps where information is missing or uncertain
+2. Use available tools to search for relevant data (call tools proactively!)
+3. Synthesize retrieved documents and knowledge graph data into a structured research brief
+4. Cite your sources precisely (chunk IDs and entity IDs)
+5. Flag gaps where information is missing or uncertain
 
 Your output MUST be a JSON object with this structure:
 {
@@ -61,10 +68,12 @@ Your output MUST be a JSON object with this structure:
     "confidence": 0.0-1.0
 }
 
+IMPORTANT: Use tools to search for information BEFORE writing your research brief.
+Multiple searches with different queries will give you better coverage.
 Be thorough but concise. Focus on RELEVANCE to the task at hand."""
 
     async def execute(self, state: AgentState) -> AgentState:
-        """Execute research by querying vector store and KG."""
+        """Execute research by querying vector store and KG (with tool loop)."""
         task = state.original_task
         subtask = None
         if state.current_subtask_id and state.plan:
@@ -76,7 +85,7 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
         query = subtask.description if subtask else task
         logger.info("researcher_executing", query=query[:100])
 
-        # Gather context from vector store and KG
+        # Gather initial context (direct queries for baseline)
         context_parts = []
         citations: list[str] = []
 
@@ -101,24 +110,38 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
 
         context = "\n".join(context_parts) if context_parts else "No relevant documents found in knowledge base."
 
-        # Ask LLM to synthesize
         user_msg = f"Task: {task}\n\nResearch query: {query}\n\nSynthesize the following retrieved information into a structured research brief."
-        result = await self._call_llm(user_msg, context=context)
+
+        # Use tool loop if tools are available — agent autonomously gathers more data
+        if self._tool_registry and self._tool_registry.available_tools:
+            result, tool_results = await self._call_llm_with_tools(user_msg, context=context)
+            # Collect additional citations from tool results
+            for tr in tool_results:
+                if tr.success and tr.metadata.get("chunk_ids"):
+                    citations.extend(tr.metadata["chunk_ids"])
+                if tr.success and tr.metadata.get("entity_ids"):
+                    citations.extend(tr.metadata["entity_ids"])
+        else:
+            result = await self._call_llm(user_msg, context=context)
 
         # Parse response and create artifact
         confidence = self._extract_confidence(result.content)
         artifact = self._create_artifact(
             artifact_type="research",
             content=result.content,
-            citations=citations,
+            citations=list(set(citations)),
             confidence=confidence,
-            metadata={"query": query, "num_sources": len(citations)},
+            metadata={
+                "query": query,
+                "num_sources": len(citations),
+                "used_tools": bool(self._tool_registry and self._tool_registry.available_tools),
+            },
         )
 
         state.artifacts.append(artifact)
         logger.info(
             "researcher_complete",
-            citations=len(citations),
+            citations=len(set(citations)),
             confidence=confidence,
         )
         return state
@@ -129,7 +152,6 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
             return ""
 
         parts = []
-        # Search for entities matching keywords in the query
         all_entities = self._kg_backend.get_all_entities()
         query_lower = query.lower()
         relevant = [
@@ -146,7 +168,6 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
             for entity in relevant[:10]:
                 parts.append(f"  - {entity.name} ({entity.entity_type}): {entity.description or 'no description'}")
 
-                # Get relations for this entity
                 neighbors = self._kg_backend.get_neighbors(entity.id)
                 for neighbor in neighbors[:3]:
                     parts.append(f"    -> related to: {neighbor.name} ({neighbor.entity_type})")
@@ -156,7 +177,6 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
     def _extract_confidence(self, content: str) -> float:
         """Try to extract the confidence score from the LLM's JSON response."""
         try:
-            # Attempt to find JSON in the response
             start = content.find("{")
             end = content.rfind("}") + 1
             if start != -1 and end > start:
@@ -164,4 +184,4 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
                 return float(data.get("confidence", 0.8))
         except (json.JSONDecodeError, ValueError):
             pass
-        return 0.8  # Default confidence if parsing fails
+        return 0.8
