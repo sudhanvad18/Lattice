@@ -31,6 +31,7 @@ class Entity(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str = Field(..., description="Human-readable entity name")
     entity_type: str = Field(..., description="Type label (e.g., 'Component', 'Procedure')")
+    description: Optional[str] = Field(None, description="Human-readable description of this entity")
     properties: dict[str, Any] = Field(default_factory=dict)
     source_chunk_ids: list[str] = Field(
         default_factory=list,
