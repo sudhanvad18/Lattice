@@ -1,0 +1,30 @@
+{
+  "name": "aerospace-quality",
+  "description": "Aerospace engine maintenance and quality documentation",
+  "entity_types": [
+    {"name": "Component", "description": "Engine parts, assemblies, sub-systems"},
+    {"name": "FailureMode", "description": "Known failure types"},
+    {"name": "Procedure", "description": "Inspection, maintenance, repair workflows"},
+    {"name": "Specification", "description": "Engineering tolerances, material specs"},
+    {"name": "RootCause", "description": "Underlying causes of failures"},
+    {"name": "Mitigation", "description": "Actions that reduce failure risk"}
+  ],
+  "relation_types": [
+    {"name": "HAS_COMPONENT", "description": "Assembly contains part"},
+    {"name": "HAS_FAILURE_MODE", "description": "Component can fail in this way"},
+    {"name": "CAUSED_BY", "description": "Failure is caused by root cause"},
+    {"name": "MITIGATED_BY", "description": "Failure is mitigated by action"},
+    {"name": "REQUIRES_PROCEDURE", "description": "Component requires this procedure"},
+    {"name": "REFERENCES_SPEC", "description": "Procedure references specification"}
+  ],
+  "chunking": {
+    "strategy": "semantic",
+    "max_chunk_tokens": 400,
+    "context_overlap_tokens": 50
+  },
+  "guardrails": {
+    "citation_enforcement": {"min_citation_ratio": 0.5},
+    "confidence_gating": {"abstention_threshold": 0.4, "warn_threshold": 0.7},
+    "hallucination_detection": {"max_ungrounded_ratio": 0.3}
+  }
+}

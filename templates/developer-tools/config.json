@@ -1,0 +1,32 @@
+{
+  "name": "developer-tools",
+  "description": "Software services, APIs, architecture docs, and runbooks",
+  "entity_types": [
+    {"name": "Service", "description": "Microservice or system component"},
+    {"name": "Endpoint", "description": "API endpoint or interface"},
+    {"name": "Error", "description": "Known error type or failure mode"},
+    {"name": "Runbook", "description": "Operational procedure for incidents"},
+    {"name": "Dependency", "description": "External library or service dependency"},
+    {"name": "DataModel", "description": "Database table or data structure"},
+    {"name": "Team", "description": "Owning team or squad"}
+  ],
+  "relation_types": [
+    {"name": "EXPOSES", "description": "Service exposes endpoint"},
+    {"name": "DEPENDS_ON", "description": "Service depends on another"},
+    {"name": "PRODUCES_ERROR", "description": "Endpoint can produce error"},
+    {"name": "RESOLVED_BY", "description": "Error resolved by runbook"},
+    {"name": "OWNS", "description": "Team owns service"},
+    {"name": "USES_MODEL", "description": "Service uses data model"},
+    {"name": "CALLS", "description": "Service calls another service"}
+  ],
+  "chunking": {
+    "strategy": "auto",
+    "max_chunk_tokens": 300,
+    "context_overlap_tokens": 30
+  },
+  "guardrails": {
+    "citation_enforcement": {"min_citation_ratio": 0.3},
+    "confidence_gating": {"abstention_threshold": 0.3, "warn_threshold": 0.6},
+    "hallucination_detection": {"max_ungrounded_ratio": 0.4}
+  }
+}

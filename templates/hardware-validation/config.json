@@ -1,0 +1,31 @@
+{
+  "name": "hardware-validation",
+  "description": "Hardware test suites, validation matrices, and failure tracking",
+  "entity_types": [
+    {"name": "TestSuite", "description": "Collection of related test cases"},
+    {"name": "TestCase", "description": "Individual test with pass/fail criteria"},
+    {"name": "DUT", "description": "Device Under Test — hardware being validated"},
+    {"name": "Failure", "description": "Test failure with symptoms and logs"},
+    {"name": "RootCause", "description": "Underlying hardware/firmware issue"},
+    {"name": "Fix", "description": "Resolution applied to address root cause"},
+    {"name": "Requirement", "description": "Product requirement being validated"}
+  ],
+  "relation_types": [
+    {"name": "CONTAINS_TEST", "description": "Suite contains test case"},
+    {"name": "VALIDATES", "description": "Test case validates requirement"},
+    {"name": "FAILED_ON", "description": "Test case failed on DUT"},
+    {"name": "CAUSED_BY", "description": "Failure caused by root cause"},
+    {"name": "FIXED_BY", "description": "Root cause fixed by resolution"},
+    {"name": "DEPENDS_ON", "description": "Test depends on another test passing"}
+  ],
+  "chunking": {
+    "strategy": "auto",
+    "max_chunk_tokens": 350,
+    "context_overlap_tokens": 40
+  },
+  "guardrails": {
+    "citation_enforcement": {"min_citation_ratio": 0.6},
+    "confidence_gating": {"abstention_threshold": 0.35, "warn_threshold": 0.65},
+    "hallucination_detection": {"max_ungrounded_ratio": 0.35}
+  }
+}

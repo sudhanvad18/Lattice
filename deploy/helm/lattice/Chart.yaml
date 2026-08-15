@@ -1,0 +1,16 @@
+apiVersion: v2
+name: lattice
+description: Lattice Agent Platform — autonomous AI agent team with observability
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+dependencies:
+  - name: redis
+    version: "18.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+  - name: neo4j
+    version: "5.x.x"
+    repository: https://helm.neo4j.com/neo4j
+    condition: neo4j.enabled

@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY packages/core/ /app/packages/core/
+COPY packages/mcp/ /app/packages/mcp/
+
+RUN pip install --no-cache-dir \
+    mcp pydantic structlog httpx \
+    -e /app/packages/core
+
+EXPOSE 8100
+
+CMD ["python", "-m", "lattice_mcp.server"]

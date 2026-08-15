@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY packages/core/ /app/packages/core/
+COPY packages/api/ /app/packages/api/
+
+RUN pip install --no-cache-dir \
+    fastapi uvicorn[standard] pydantic pydantic-settings \
+    langfuse opentelemetry-api opentelemetry-sdk prometheus-client \
+    structlog chromadb redis httpx langgraph langchain-core \
+    -e /app/packages/core
+
+COPY packages/api/ /app/packages/api/
+
+EXPOSE 8000
+
+CMD ["uvicorn", "lattice_api.app:app", "--host", "0.0.0.0", "--port", "8000"]

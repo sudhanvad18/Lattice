@@ -1,0 +1,87 @@
+replicaCount: 2
+
+image:
+  api:
+    repository: ghcr.io/sudhanvad18/lattice-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  dashboard:
+    repository: ghcr.io/sudhanvad18/lattice-dashboard
+    tag: latest
+    pullPolicy: IfNotPresent
+  mcp:
+    repository: ghcr.io/sudhanvad18/lattice-mcp
+    tag: latest
+    pullPolicy: IfNotPresent
+
+service:
+  api:
+    type: ClusterIP
+    port: 8000
+  dashboard:
+    type: ClusterIP
+    port: 3000
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: lattice.example.com
+      paths:
+        - path: /api
+          pathType: Prefix
+          service: api
+        - path: /
+          pathType: Prefix
+          service: dashboard
+
+resources:
+  api:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  dashboard:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: true
+    password: ""  # Set via --set redis.auth.password=...
+
+neo4j:
+  enabled: true
+  neo4j:
+    password: ""  # Set via --set neo4j.neo4j.password=...
+
+ollama:
+  enabled: true
+  gpu:
+    enabled: false  # Enable for GPU nodes
+
+env:
+  LATTICE_ENV: production
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+
+secrets:
+  langfusePublicKey: ""
+  langfuseSecretKey: ""
+  openaiApiKey: ""
+  anthropicApiKey: ""

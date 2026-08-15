@@ -90,15 +90,15 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
         citations: list[str] = []
 
         if self._vector_store:
-            vs_results = self._vector_store.search(query, n_results=self._top_k)
+            vs_results = self._vector_store.search(query, top_k=self._top_k)
             if vs_results:
                 context_parts.append("## Retrieved Documents\n")
                 for i, result in enumerate(vs_results):
-                    chunk_id = result.get("id", f"chunk_{i}")
-                    content = result.get("content", "")
-                    distance = result.get("distance", 0.0)
+                    chunk_id = getattr(result, "chunk_id", f"chunk_{i}")
+                    content = getattr(result, "content", "")
+                    similarity = getattr(result, "similarity", 0.0)
                     context_parts.append(
-                        f"[{chunk_id}] (relevance: {1 - distance:.2f})\n{content}\n"
+                        f"[{chunk_id}] (relevance: {similarity:.2f})\n{content}\n"
                     )
                     citations.append(chunk_id)
 
@@ -169,7 +169,7 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
                 parts.append(f"  - {entity.name} ({entity.entity_type}): {entity.description or 'no description'}")
 
                 neighbors = self._kg_backend.get_neighbors(entity.id)
-                for neighbor in neighbors[:3]:
+                for neighbor in neighbors.entities[:3]:
                     parts.append(f"    -> related to: {neighbor.name} ({neighbor.entity_type})")
 
         return "\n".join(parts)
