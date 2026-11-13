@@ -1,236 +1,93 @@
 # Lattice
 
-**Autonomous AI Agent Platform with Full Observability**
+**Research, write, review, and revise—with the workflow made explicit.**
 
-A production-grade multi-agent system where specialized AI agents collaborate to research, write, review, and deliver — with write-back to real systems, human-in-the-loop approval, and complete traceability.
+Lattice is a Python multi-agent platform built around a LangGraph state machine. It decomposes tasks, passes research artifacts to a writer, and routes drafts through a reviewer. Knowledge-graph and vector-retrieval components provide context; a FastAPI service exposes task status, artifacts, and audit events.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Lattice Platform                          │
-├─────────────┬──────────────┬──────────────┬────────────────────┤
-│  Dashboard  │   REST API   │  MCP Server  │   CLI (planned)    │
-├─────────────┴──────────────┴──────────────┴────────────────────┤
-│                     Agent Orchestrator (LangGraph)               │
-├────────┬──────────┬─────────┬──────────┬───────────────────────┤
-│Research│  Writer  │Reviewer │   Code   │      Ingestion        │
-│ Agent  │  Agent   │  Agent  │  Agent   │       Agent           │
-├────────┴──────────┴─────────┴──────────┴───────────────────────┤
-│  Guardrails  │  Observability  │  Write-Back Engine  │  Eval   │
-├──────────────┴─────────────────┴─────────────────────┴─────────┤
-│   Knowledge Graph (NetworkX/Neo4j)  │  Vector Store (ChromaDB)  │
-├─────────────────────────────────────┴───────────────────────────┤
-│  Inference Providers: Ollama │ Anthropic │ OpenAI │ Mock        │
-└─────────────────────────────────────────────────────────────────┘
-```
+[Run the offline example](#try-the-workflow) · [Development guide](docs/development.md) · [Architecture](#how-it-works)
 
-## Key Features
+[![Captioned replay of Lattice's actual offline orchestration run, using scripted model responses.](docs/assets/lattice-offline-preview.gif)](docs/assets/lattice-offline-demo.webm)
 
-| Feature | Description |
-|---------|-------------|
-| **Multi-Agent Orchestration** | LangGraph-powered workflow: plan → research → write → review → iterate |
-| **Write-Back** | Agents modify real systems (GitHub PRs, file system, knowledge graph) |
-| **Human-in-the-Loop** | Configurable approval gates: always, on-low-confidence, or auto |
-| **Guardrails** | Citation enforcement, confidence gating, hallucination detection |
-| **Observability** | LangFuse traces, OpenTelemetry spans, Prometheus metrics |
-| **Tool-Use Loop** | Agents autonomously call tools (search, KG query, custom) during execution |
-| **Evaluation** | Benchmark engine measuring quality, citation accuracy, latency, iterations |
-| **Domain Templates** | Pre-configured for aerospace, hardware validation, developer tools |
-| **MCP Integration** | Exposes agents as IDE tools for Cursor, Claude Code, etc. |
+**[Watch the 34-second walkthrough](docs/assets/lattice-offline-demo.webm)** · [Static summary](docs/assets/offline-workflow.svg) · [Demo notes](docs/demo.md)
 
-## Quick Start
+*A replay of the real orchestrator running with `MockProvider`. The model responses are scripted fixtures; the planning, artifact history, and review loop execute in Lattice.*
 
-### Local Development
+*Scripted offline demonstration · actual orchestrator output. [Full recorded fixture output](docs/assets/mock-workflow.txt).*
+
+## Try the workflow
+
+Use Python 3.11 or later:
 
 ```bash
-# Clone and setup
 git clone https://github.com/sudhanvad18/Lattice.git
 cd Lattice
-python -m venv .venv && source .venv/bin/activate
-pip install -e "packages/core[dev]"
-
-# Run tests
-pytest
-
-# Start API server
-uvicorn lattice_api.app:app --reload
-
-# Start dashboard
-cd packages/dashboard && npm install && npm run dev
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev,local]' prometheus-client
+python examples/mock_workflow.py
 ```
 
-### Docker (Full Stack)
+This example runs the real orchestrator with **scripted model responses**. It exercises research, artifact creation, rejection, and revision without a running model, API key, or external write:
+
+```text
+LATTICE / OFFLINE WORKFLOW
+Provider: MockProvider (scripted responses)
+Network/model requests: none
+Flow: plan -> research -> write -> reject -> revise -> approve
+Status: completed
+Artifacts: 3 (1 research, 2 document versions)
+Reviews: rejected -> approved
+Provider calls: 6
+```
+
+The fixture demonstrates control flow, not model quality. For a model-backed run, see [the local Ollama demo](docs/development.md#model-backed-demo).
+
+## How it works
+
+```mermaid
+flowchart LR
+    T[Task] --> P[Plan subtasks]
+    P --> R[Research]
+    K[Knowledge graph + vector retrieval] -. optional context .-> R
+    R --> W[Write artifact]
+    W --> V[Review]
+    V -- revise --> W
+    V -- approve --> O[Result + review history]
+```
+
+The orchestrator tracks dependencies between research and writing subtasks. Reviewer feedback becomes context for the next draft. Agents share a provider interface, so the same workflow can use Ollama, Anthropic, OpenAI, or a mock provider in tests.
+
+## What's implemented
+
+| Component | Behavior |
+| --- | --- |
+| Agent runtime | Planning, research/writing dispatch, artifact review, revision loops, and a tool-use interface. |
+| Knowledge layer | NetworkX/Neo4j graph backends, ChromaDB storage, document ingestion, retrieval, and reranking components. |
+| Task API | Submit/list tasks; retrieve status, results, and audit events; stream task events over WebSocket. |
+| Write-back library | File, GitHub, and knowledge-graph handlers with validation, approval gates, history, and rollback interfaces. |
+| Observability and evaluation | Local trace records, optional exporters, metrics definitions, evaluation utilities, and mock-based regression tests. |
+
+The Next.js dashboard, MCP server, and deployment manifests are integration surfaces under development. The default API task path does not automatically invoke the write-back engine or enforce its approval gates. The dashboard's current endpoint contracts need alignment with the API; [development notes](docs/development.md#integration-status) document those boundaries.
+
+## Repository map
+
+```text
+packages/core/lattice/  Agents, knowledge/retrieval, write-back, observability
+packages/api/          FastAPI task service and audit records
+packages/mcp/          MCP server source
+packages/dashboard/    Next.js / React / TypeScript interface
+examples/              Offline orchestration example
+tests/                 Component and mock-provider workflow tests
+deploy/                Helm and Terraform configuration
+docker/                Container and observability configuration
+```
+
+## Develop
+
+The package manifest is the root `pyproject.toml`. Run tests from the repository root:
 
 ```bash
-docker compose up -d
-# API: http://localhost:8000
-# Dashboard: http://localhost:3000
-# Grafana: http://localhost:3001
-# Neo4j: http://localhost:7474
+python -m pytest
 ```
 
-### Kubernetes
-
-```bash
-helm install lattice deploy/helm/lattice \
-  --set redis.auth.password=<your-password> \
-  --set neo4j.neo4j.password=<your-password> \
-  --set secrets.anthropicApiKey=<key>
-```
-
-## Architecture
-
-### Agent Workflow
-
-```
-User Task → Orchestrator → [Plan Subtasks]
-                               │
-              ┌────────────────┼────────────────┐
-              ▼                ▼                 ▼
-         Researcher        Writer           Code Agent
-         (RAG + KG)     (Generate)        (Code/Refactor)
-              │                │                 │
-              └────────────────┼─────────────────┘
-                               ▼
-                           Reviewer
-                     (LLM-as-Judge + Guardrails)
-                               │
-                    ┌──────────┴──────────┐
-                    ▼                     ▼
-               APPROVED              REJECTED
-                    │                     │
-                    ▼                     ▼
-            Write-Back Engine      Loop (max 3 revisions)
-            (GitHub/FS/KG)
-```
-
-### Observability Stack
-
-- **LangFuse**: Full call-chain traces (orchestrator → researcher → writer → reviewer)
-- **OpenTelemetry**: Distributed tracing with OTLP export to Jaeger/Tempo
-- **Prometheus**: Task throughput, agent utilization, LLM token usage, error rates
-- **Structured Logging**: Every log line carries trace_id + span_id for correlation
-
-### Guardrails (Pre-Write-Back)
-
-1. **Citation Enforcement** — Factual claims must reference sources
-2. **Confidence Gating** — Below threshold → system abstains instead of hallucinating
-3. **Hallucination Detection** — Claims cross-referenced against Knowledge Graph entities
-
-## Repository Structure
-
-```
-lattice/
-├── packages/
-│   ├── core/                    # Agent runtime + data layer
-│   │   └── lattice/
-│   │       ├── agents/          # LangGraph agents + orchestrator
-│   │       ├── graph/           # Knowledge graph (NetworkX/Neo4j)
-│   │       ├── retrieval/       # Vector store + cross-encoder reranker
-│   │       ├── ingestion/       # Document parsing + chunking
-│   │       ├── inference/       # LLM provider abstraction
-│   │       ├── guardrails/      # Safety verification layer
-│   │       ├── observability/   # Tracing + metrics + OTel
-│   │       ├── writeback/       # Write-back engine + handlers
-│   │       └── evaluation/      # Benchmark + citation utility
-│   ├── api/                     # FastAPI backend + WebSocket
-│   ├── mcp/                     # MCP server for IDE integration
-│   └── dashboard/               # Next.js frontend
-├── deploy/
-│   ├── helm/                    # Kubernetes Helm chart
-│   └── terraform/               # AWS infrastructure (EKS + RDS + ElastiCache)
-├── docker/                      # Dockerfiles + observability configs
-├── templates/                   # Domain-specific starter configs
-│   ├── aerospace/
-│   ├── hardware-validation/
-│   └── developer-tools/
-├── tests/                       # 219 tests, 86% coverage
-├── docker-compose.yml           # Full stack in one command
-└── mcp.json                     # MCP configuration for IDEs
-```
-
-## Benchmark Results
-
-| Metric | Score |
-|--------|-------|
-| Task Completion Rate | 92% |
-| Average Quality Score | 0.85 |
-| Citation Accuracy | 0.88 |
-| Average Latency | 12.4s |
-| Revision Efficiency | 1.8 iterations avg |
-
-*Measured on 6 evaluation tasks using Ollama (llama3.2) with the demo knowledge base.*
-
-## Configuration
-
-Environment variables (or `.env` file):
-
-```env
-# Inference
-OLLAMA_HOST=http://localhost:11434
-ANTHROPIC_API_KEY=sk-...
-OPENAI_API_KEY=sk-...
-
-# Storage
-REDIS_URL=redis://localhost:6379/0
-CHROMADB_HOST=localhost
-NEO4J_URI=bolt://localhost:7687
-
-# Observability
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-LANGFUSE_PUBLIC_KEY=pk-...
-LANGFUSE_SECRET_KEY=sk-...
-
-# Safety
-LATTICE_APPROVAL_MODE=on_low_confidence  # always | on_low_confidence | never
-```
-
-## Domain Templates
-
-Start with a pre-configured setup for your industry:
-
-```bash
-lattice init --template aerospace          # Engine maintenance + quality docs
-lattice init --template hardware-validation # Test suites + failure tracking
-lattice init --template developer-tools    # Services + APIs + runbooks
-```
-
-Each template provides:
-- Entity/relation type definitions for the knowledge graph
-- Tuned guardrail thresholds
-- Agent system prompt specializations
-- Chunking strategy optimized for document types
-
-## Technology Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Orchestration | LangGraph |
-| Inference | Ollama, Anthropic, OpenAI |
-| Vector Store | ChromaDB |
-| Knowledge Graph | NetworkX (dev), Neo4j (prod) |
-| Reranking | PyTorch cross-encoder (fine-tunable) |
-| API | FastAPI + WebSocket |
-| Frontend | Next.js 16 + TypeScript + Tailwind |
-| Observability | LangFuse + OpenTelemetry + Prometheus |
-| Infrastructure | Docker Compose, Helm, Terraform (AWS) |
-| Testing | pytest (219 tests, 86% coverage) |
-
-## Contributing
-
-```bash
-# Setup dev environment
-pip install -e "packages/core[dev]"
-
-# Run tests with coverage
-pytest --cov
-
-# Type checking
-mypy packages/core/
-
-# Lint
-ruff check packages/
-```
-
-## License
-
-MIT
+For the supported local service commands, configuration variables, focused offline checks, and demo recording path, see [docs/development.md](docs/development.md). Test output and recorded benchmark artifacts should accompany any published quality or performance claims.
