@@ -35,3 +35,7 @@ packages/dashboard/.next/
 # OS
 .DS_Store
 Thumbs.db
+
+# Multi-agent orchestration (worktrees + task specs, logs, handoffs)
+.worktrees/
+.ai/

@@ -1,0 +1,29 @@
+---
+description: Multi-agent orchestration playbook. Use when the user says "Orchestrate <feature>" or asks to split work across Codex workers / git worktrees.
+alwaysApply: false
+---
+
+# Orchestrate: Cursor as manager, Codex CLI as parallel workers
+
+Scripts live in `scripts/orchestrate/`. State lives in `.ai/` and `.worktrees/` (both gitignored).
+
+## Phase 1 — Architecture & contracts (no application code)
+1. Break the feature into 2–4 tasks that touch **disjoint files**. If two tasks must share an interface, write it first in `.ai/contracts.md` (and commit any shared stub/interface code to the base branch so workers branch from it).
+2. Write `.ai/task-<name>.md` per task. First line is a `# Title` (used as the commit message). Include: goal, exact files to create/modify, files NOT to touch, contract references, acceptance criteria, tests to add, and the verify command (`scripts/test.sh <paths>`).
+3. Show the specs to the user and wait for approval.
+
+## Phase 2 — Dispatch
+1. Base branch must be clean (`git status`); commit contracts/stubs first.
+2. Run in the background: `MAX_PARALLEL=3 scripts/orchestrate/dispatch.sh <name> <name> ...`
+3. Poll with `scripts/orchestrate/status.sh` (use `TAIL=20` for more log). Do not edit files inside `.worktrees/` while workers run.
+
+## Phase 3 — Merge, integrate, QA
+1. Read `.ai/logs/<name>.exit`, `.ai/handoff-<name>.md`, and `git diff HEAD...agent/<name>` for each task. Reject or fix work that strays outside its spec.
+2. `git merge --no-ff agent/<name>` one branch at a time; resolve conflicts; run `scripts/test.sh` after each merge.
+3. `scripts/orchestrate/cleanup.sh --delete-branches`, then run the full suite and (if UI changed) `npm run dev` in `packages/dashboard`.
+4. Report to the user: what merged, test results, and any handoff caveats.
+
+## Limits
+- Max 3–4 concurrent workers (API rate limits, CPU when suites run in parallel).
+- Workers have no network: no new dependencies unless pre-installed in `.venv`.
+- Workers never run git; `dispatch.sh` commits their work on `agent/<name>`.
