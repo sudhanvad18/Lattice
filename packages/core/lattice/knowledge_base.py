@@ -24,7 +24,7 @@ from pathlib import Path
 import structlog
 
 from lattice.graph.builder import KnowledgeGraphBuilder
-from lattice.graph.engine import KnowledgeGraphBackend
+from lattice.graph.engine import KnowledgeGraphBackend, NetworkXBackend
 from lattice.graph.factory import create_graph_backend
 from lattice.graph.models import Entity, KGQueryResult, KGStats
 from lattice.ingestion.cache import IngestionCache
@@ -51,6 +51,7 @@ class KnowledgeBase:
         graph_backend: KnowledgeGraphBackend | None = None,
     ) -> None:
         persist_path = Path(persist_dir)
+        self._persist_path = persist_path
 
         cache = IngestionCache(persist_path / "ingestion_cache") if enable_cache else None
         self._pipeline = IngestionPipeline(chunk_config=chunk_config, cache=cache)
@@ -58,7 +59,15 @@ class KnowledgeBase:
             persist_dir=persist_path / "chroma",
             collection_name="lattice_chunks",
         )
-        self._kg_builder = KnowledgeGraphBuilder(backend=graph_backend or create_graph_backend())
+        backend = graph_backend if graph_backend is not None else create_graph_backend()
+        graph_path = persist_path / "graph.json"
+        if isinstance(backend, NetworkXBackend) and graph_path.exists():
+            try:
+                backend = NetworkXBackend.load(graph_path)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                logger.warning("graph_snapshot_corrupt", path=str(graph_path), error=str(exc))
+                backend = NetworkXBackend()
+        self._kg_builder = KnowledgeGraphBuilder(backend=backend)
         self._chunks: list[Chunk] = []
 
     @property
@@ -68,6 +77,19 @@ class KnowledgeBase:
 
     def close(self) -> None:
         self.graph.close()
+
+    def reset(self) -> None:
+        """Clear persisted chunks, graph, and ingestion cache."""
+        self._vector_store.reset()
+        if isinstance(self.graph, NetworkXBackend):
+            self._kg_builder.backend = NetworkXBackend()
+        elif hasattr(self.graph, "clear"):
+            self.graph.clear()
+        IngestionCache(self._persist_path / "ingestion_cache").clear()
+        if self._pipeline._cache is not None:
+            self._pipeline._cache.clear()
+        self._chunks.clear()
+        (self._persist_path / "graph.json").unlink(missing_ok=True)
 
     @property
     def vector_store(self) -> VectorStore:
@@ -145,6 +167,9 @@ class KnowledgeBase:
             pass
         except Exception as e:
             logger.debug("clustering_skipped", reason=str(e))
+
+        if isinstance(self.graph, NetworkXBackend):
+            self.graph.save(self._persist_path / "graph.json")
 
         self._chunks.extend(chunks)
 

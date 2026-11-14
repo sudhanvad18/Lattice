@@ -52,10 +52,15 @@ dependencies = [
     "opentelemetry-sdk>=1.25.0",
 
     # Utilities
+    "click>=8.1",
+    "rich>=13",
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
     "PyGithub>=2.0.0",
 ]
+
+[project.scripts]
+lattice = "lattice.cli:main"
 
 [project.optional-dependencies]
 dev = [
