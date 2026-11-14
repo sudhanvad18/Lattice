@@ -138,11 +138,25 @@ def test_failed_task_exits_one(invoke, monkeypatch):
     assert "Status: failed" in result.output
 
 
-def test_serve(invoke, monkeypatch):
+def test_serve(invoke, monkeypatch, tmp_path):
+    import os
+
     calls = []
-    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    # setenv first so monkeypatch restores the original value after serve overwrites it.
+    monkeypatch.setenv("LATTICE_DATA_DIR", "unset")
+    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: calls.append(
+        (args, kwargs, os.environ.get("LATTICE_DATA_DIR"))
+    ))
     assert invoke("serve", "--host", "0.0.0.0", "--port", "9000").exit_code == 0
-    assert calls == [(("lattice_api.app:app",), {"host": "0.0.0.0", "port": 9000})]
+    assert calls == [
+        (("lattice_api.app:app",), {"host": "0.0.0.0", "port": 9000}, str(tmp_path))
+    ]
+
+
+def test_subcommand_help_exits_cleanly(invoke):
+    result = invoke("serve", "--help")
+    assert result.exit_code == 0
+    assert "Error" not in result.output
 
 
 def test_help_and_empty_queries(invoke):

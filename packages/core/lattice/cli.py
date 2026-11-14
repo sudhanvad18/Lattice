@@ -31,7 +31,7 @@ class FriendlyGroup(click.Group):
     def invoke(self, ctx: click.Context):
         try:
             return super().invoke(ctx)
-        except click.ClickException:
+        except (click.ClickException, click.exceptions.Exit, click.Abort):
             raise
         except Exception as exc:
             raise click.ClickException(str(exc)) from exc
@@ -204,10 +204,14 @@ def run(ctx: click.Context, task: str, provider: str | None, model: str | None,
 @main.command()
 @click.option("--host", default="127.0.0.1", show_default=True)
 @click.option("--port", default=8000, type=click.IntRange(1, 65535), show_default=True)
-def serve(host: str, port: int) -> None:
+@click.pass_context
+def serve(ctx: click.Context, host: str, port: int) -> None:
     """Start the Lattice API server."""
+    import os
+
     import uvicorn
 
+    os.environ["LATTICE_DATA_DIR"] = str(ctx.obj["data_dir"])
     uvicorn.run("lattice_api.app:app", host=host, port=port)
 
 
