@@ -1,8 +1,20 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { Network, ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
+import { Network as NetworkIcon, Search, ZoomIn, ZoomOut, Maximize2, X } from "lucide-react";
 import { getKnowledgeGraph, KGNode, KGEdge } from "@/lib/api";
+
+const COMMUNITY_PALETTE = [
+  "#34d399", "#60a5fa", "#f87171", "#a78bfa", "#fbbf24",
+  "#f472b6", "#2dd4bf", "#fb923c", "#818cf8", "#4ade80",
+  "#e879f9", "#38bdf8", "#facc15", "#a3e635", "#f43f5e",
+];
+
+const PROVENANCE_STYLES: Record<string, { dash: number[]; opacity: number; label: string }> = {
+  extracted: { dash: [], opacity: 0.7, label: "Extracted" },
+  inferred: { dash: [6, 4], opacity: 0.5, label: "Inferred" },
+  ambiguous: { dash: [2, 3], opacity: 0.35, label: "Ambiguous" },
+};
 
 interface NodePosition {
   x: number;
@@ -18,13 +30,18 @@ export function KnowledgeGraphView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<KGNode | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const [zoom, setZoom] = useState(1);
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const positionsRef = useRef<NodePosition[]>([]);
   const animRef = useRef<number>(0);
+  const isDragging = useRef(false);
+  const dragStart = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
     loadGraph();
+    return () => cancelAnimationFrame(animRef.current);
   }, []);
 
   const loadGraph = async () => {
@@ -32,34 +49,34 @@ export function KnowledgeGraphView() {
       const data = await getKnowledgeGraph();
       setNodes(data.nodes);
       setEdges(data.edges);
-      initPositions(data.nodes);
+      initPositions(data.nodes, data.edges);
     } catch {
       setError("Could not connect to API. Using demo data.");
       const demo = getDemoData();
       setNodes(demo.nodes);
       setEdges(demo.edges);
-      initPositions(demo.nodes);
+      initPositions(demo.nodes, demo.edges);
     } finally {
       setLoading(false);
     }
   };
 
-  const initPositions = (nodes: KGNode[]) => {
+  const initPositions = (initNodes: KGNode[], initEdges: KGEdge[]) => {
     const width = 800;
     const height = 600;
-    positionsRef.current = nodes.map((node) => ({
+    positionsRef.current = initNodes.map((node) => ({
       x: width / 2 + (Math.random() - 0.5) * 400,
       y: height / 2 + (Math.random() - 0.5) * 300,
       vx: 0,
       vy: 0,
       node,
     }));
-    startSimulation();
+    startSimulation(initEdges);
   };
 
-  const startSimulation = useCallback(() => {
+  const startSimulation = useCallback((simEdges: KGEdge[]) => {
     let ticks = 0;
-    const maxTicks = 200;
+    const maxTicks = 250;
 
     const tick = () => {
       if (ticks >= maxTicks) return;
@@ -69,7 +86,6 @@ export function KnowledgeGraphView() {
       const width = 800;
       const height = 600;
 
-      // Repulsion between all nodes
       for (let i = 0; i < positions.length; i++) {
         for (let j = i + 1; j < positions.length; j++) {
           const dx = positions[j].x - positions[i].x;
@@ -85,8 +101,7 @@ export function KnowledgeGraphView() {
         }
       }
 
-      // Attraction along edges
-      for (const edge of edges) {
+      for (const edge of simEdges) {
         const si = positions.findIndex((p) => p.node.id === edge.source);
         const ti = positions.findIndex((p) => p.node.id === edge.target);
         if (si === -1 || ti === -1) continue;
@@ -102,7 +117,6 @@ export function KnowledgeGraphView() {
         positions[ti].vy -= fy;
       }
 
-      // Center gravity
       for (const p of positions) {
         p.vx += (width / 2 - p.x) * 0.001;
         p.vy += (height / 2 - p.y) * 0.001;
@@ -120,9 +134,21 @@ export function KnowledgeGraphView() {
 
     cancelAnimationFrame(animRef.current);
     tick();
-  }, [edges]);
+  }, []);
 
-  const draw = () => {
+  const nodeColor = (node: KGNode): string => {
+    if (node.community != null) {
+      return COMMUNITY_PALETTE[node.community % COMMUNITY_PALETTE.length];
+    }
+    const fallback: Record<string, string> = {
+      component: "#34d399", service: "#60a5fa", failure_mode: "#f87171",
+      procedure: "#a78bfa", person: "#fbbf24", Function: "#38bdf8",
+      Class: "#f472b6", Module: "#2dd4bf",
+    };
+    return fallback[node.entity_type] || "#a1a1aa";
+  };
+
+  const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -131,66 +157,94 @@ export function KnowledgeGraphView() {
     const positions = positionsRef.current;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save();
+    ctx.translate(panOffset.x, panOffset.y);
     ctx.scale(zoom, zoom);
 
-    // Draw edges
-    ctx.strokeStyle = "rgba(63, 63, 70, 0.6)";
-    ctx.lineWidth = 1;
+    const searchLower = searchQuery.toLowerCase();
+    const matchIds = new Set(
+      searchLower
+        ? positions
+            .filter((p) => p.node.name.toLowerCase().includes(searchLower) || p.node.entity_type.toLowerCase().includes(searchLower))
+            .map((p) => p.node.id)
+        : []
+    );
+
     for (const edge of edges) {
       const s = positions.find((p) => p.node.id === edge.source);
       const t = positions.find((p) => p.node.id === edge.target);
       if (!s || !t) continue;
+
+      const prov = PROVENANCE_STYLES[edge.provenance || "extracted"] || PROVENANCE_STYLES.extracted;
+      const dimmed = searchLower && !matchIds.has(edge.source) && !matchIds.has(edge.target);
+
       ctx.beginPath();
+      ctx.setLineDash(prov.dash);
+      ctx.strokeStyle = dimmed ? "rgba(63,63,70,0.15)" : `rgba(161,161,170,${prov.opacity})`;
+      ctx.lineWidth = 1.2;
       ctx.moveTo(s.x, s.y);
       ctx.lineTo(t.x, t.y);
       ctx.stroke();
+      ctx.setLineDash([]);
 
-      // Edge label
+      // Arrow head
+      const angle = Math.atan2(t.y - s.y, t.x - s.x);
+      const arrowLen = 8;
       const mx = (s.x + t.x) / 2;
       const my = (s.y + t.y) / 2;
-      ctx.fillStyle = "rgba(161, 161, 170, 0.5)";
-      ctx.font = "9px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText(edge.relation_type, mx, my - 4);
+      if (!dimmed) {
+        ctx.beginPath();
+        ctx.moveTo(mx, my);
+        ctx.lineTo(mx - arrowLen * Math.cos(angle - 0.4), my - arrowLen * Math.sin(angle - 0.4));
+        ctx.moveTo(mx, my);
+        ctx.lineTo(mx - arrowLen * Math.cos(angle + 0.4), my - arrowLen * Math.sin(angle + 0.4));
+        ctx.strokeStyle = `rgba(161,161,170,${prov.opacity})`;
+        ctx.stroke();
+      }
+
+      // Edge label
+      if (!dimmed) {
+        ctx.fillStyle = `rgba(161,161,170,${prov.opacity * 0.7})`;
+        ctx.font = "9px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(edge.relation_type, mx, my - 6);
+      }
     }
 
-    // Draw nodes
-    const typeColors: Record<string, string> = {
-      component: "#34d399",
-      service: "#60a5fa",
-      failure_mode: "#f87171",
-      procedure: "#a78bfa",
-      person: "#fbbf24",
-    };
-
     for (const p of positions) {
-      const color = typeColors[p.node.entity_type] || "#a1a1aa";
+      const color = nodeColor(p.node);
       const isSelected = selected?.id === p.node.id;
-      const radius = isSelected ? 10 : 7;
+      const isMatch = matchIds.has(p.node.id);
+      const dimmed = searchLower && !isMatch && !isSelected;
+      const radius = isSelected ? 12 : isMatch ? 10 : 7;
 
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = isSelected ? color : `${color}80`;
+      ctx.fillStyle = dimmed ? `${color}20` : isSelected || isMatch ? color : `${color}80`;
       ctx.fill();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = isSelected ? 2 : 1;
+      ctx.strokeStyle = dimmed ? `${color}30` : color;
+      ctx.lineWidth = isSelected ? 2.5 : 1;
       ctx.stroke();
 
-      ctx.fillStyle = "#e4e4e7";
-      ctx.font = "11px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(p.node.name, p.x, p.y + radius + 14);
+      if (!dimmed) {
+        ctx.fillStyle = dimmed ? "rgba(228,228,231,0.2)" : "#e4e4e7";
+        ctx.font = isSelected ? "bold 12px sans-serif" : "11px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(p.node.name, p.x, p.y + radius + 14);
+      }
     }
 
     ctx.restore();
-  };
+  }, [edges, zoom, panOffset, searchQuery, selected]);
+
+  useEffect(() => { draw(); }, [draw]);
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (isDragging.current) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / zoom;
-    const y = (e.clientY - rect.top) / zoom;
+    const x = (e.clientX - rect.left - panOffset.x) / zoom;
+    const y = (e.clientY - rect.top - panOffset.y) / zoom;
 
     const clicked = positionsRef.current.find((p) => {
       const dx = p.x - x;
@@ -199,8 +253,38 @@ export function KnowledgeGraphView() {
     });
 
     setSelected(clicked?.node ?? null);
-    draw();
   };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    isDragging.current = false;
+    dragStart.current = { x: e.clientX - panOffset.x, y: e.clientY - panOffset.y };
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (e.buttons !== 1) return;
+    isDragging.current = true;
+    setPanOffset({ x: e.clientX - dragStart.current.x, y: e.clientY - dragStart.current.y });
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    setZoom((z) => Math.max(0.2, Math.min(4, z - e.deltaY * 0.001)));
+  };
+
+  const communitySet = new Set(nodes.map((n) => n.community).filter((c): c is number => c != null));
+  const communities = Array.from(communitySet).sort((a, b) => a - b);
+
+  const neighborIds = selected
+    ? new Set(
+        edges
+          .filter((e) => e.source === selected.id || e.target === selected.id)
+          .flatMap((e) => [e.source, e.target])
+          .filter((id) => id !== selected.id)
+      )
+    : new Set<string>();
+  const neighborNodes = nodes.filter((n) => neighborIds.has(n.id));
+  const selectedEdges = selected ? edges.filter((e) => e.source === selected.id || e.target === selected.id) : [];
 
   if (loading) {
     return (
@@ -216,17 +300,33 @@ export function KnowledgeGraphView() {
         <div>
           <h1 className="text-2xl font-bold">Knowledge Graph</h1>
           <p className="text-zinc-400 text-sm mt-1">
-            {nodes.length} entities, {edges.length} relations
+            {nodes.length} entities · {edges.length} relations
+            {communities.length > 0 && ` · ${communities.length} communities`}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => { setZoom(z => Math.min(z + 0.2, 3)); draw(); }} className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-2.5 top-2.5 text-zinc-500" />
+            <input
+              type="text"
+              placeholder="Search entities..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-8 pr-8 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-sm text-zinc-200 placeholder-zinc-500 w-56 focus:outline-none focus:border-zinc-500"
+            />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery("")} className="absolute right-2 top-2.5 text-zinc-500 hover:text-zinc-300">
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+          <button onClick={() => { setZoom((z) => Math.min(z + 0.2, 4)); }} className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
             <ZoomIn className="w-4 h-4" />
           </button>
-          <button onClick={() => { setZoom(z => Math.max(z - 0.2, 0.4)); draw(); }} className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
+          <button onClick={() => { setZoom((z) => Math.max(z - 0.2, 0.2)); }} className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
             <ZoomOut className="w-4 h-4" />
           </button>
-          <button onClick={() => { setZoom(1); draw(); }} className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
+          <button onClick={() => { setZoom(1); setPanOffset({ x: 0, y: 0 }); }} className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
             <Maximize2 className="w-4 h-4" />
           </button>
         </div>
@@ -238,31 +338,114 @@ export function KnowledgeGraphView() {
         </div>
       )}
 
+      {/* Legends */}
+      <div className="flex gap-6 mb-3 flex-wrap">
+        {communities.length > 0 && (
+          <div className="flex items-center gap-3 text-xs text-zinc-400">
+            <span className="font-medium text-zinc-300">Communities:</span>
+            {communities.slice(0, 8).map((c) => (
+              <span key={c} className="flex items-center gap-1">
+                <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: COMMUNITY_PALETTE[c % COMMUNITY_PALETTE.length] }} />
+                {c}
+              </span>
+            ))}
+            {communities.length > 8 && <span>+{communities.length - 8}</span>}
+          </div>
+        )}
+        <div className="flex items-center gap-3 text-xs text-zinc-400">
+          <span className="font-medium text-zinc-300">Edge style:</span>
+          {Object.entries(PROVENANCE_STYLES).map(([key, val]) => (
+            <span key={key} className="flex items-center gap-1">
+              <svg width="20" height="8"><line x1="0" y1="4" x2="20" y2="4" stroke="#a1a1aa" strokeWidth="1.5" strokeDasharray={val.dash.join(",")} opacity={val.opacity} /></svg>
+              {val.label}
+            </span>
+          ))}
+        </div>
+      </div>
+
       <div className="flex-1 flex gap-4 min-h-0">
-        <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+        <div
+          className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden"
+          onWheel={handleWheel}
+        >
           <canvas
             ref={canvasRef}
             width={800}
             height={600}
-            className="w-full h-full cursor-crosshair"
+            className="w-full h-full cursor-grab active:cursor-grabbing"
             onClick={handleCanvasClick}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
           />
         </div>
 
         {selected && (
-          <div className="w-64 bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-            <h3 className="font-medium text-sm">{selected.name}</h3>
-            <span className="inline-block mt-1 text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">
-              {selected.entity_type}
-            </span>
+          <div className="w-72 bg-zinc-900 border border-zinc-800 rounded-xl p-4 overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-sm truncate">{selected.name}</h3>
+              <button onClick={() => setSelected(null)} className="text-zinc-500 hover:text-zinc-300">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex gap-1.5 mt-2">
+              <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">
+                {selected.entity_type}
+              </span>
+              {selected.community != null && (
+                <span
+                  className="text-xs px-2 py-0.5 rounded-full text-white"
+                  style={{ backgroundColor: COMMUNITY_PALETTE[selected.community % COMMUNITY_PALETTE.length] + "cc" }}
+                >
+                  community {selected.community}
+                </span>
+              )}
+            </div>
             {selected.description && (
               <p className="text-xs text-zinc-400 mt-3">{selected.description}</p>
             )}
-            <div className="mt-3 pt-3 border-t border-zinc-800">
-              <p className="text-xs text-zinc-500">
-                Connections: {edges.filter(e => e.source === selected.id || e.target === selected.id).length}
+
+            <div className="mt-4 pt-3 border-t border-zinc-800">
+              <p className="text-xs font-medium text-zinc-300 mb-2">
+                Connections ({selectedEdges.length})
               </p>
+              {selectedEdges.map((e, i) => {
+                const otherId = e.source === selected.id ? e.target : e.source;
+                const otherNode = nodes.find((n) => n.id === otherId);
+                const direction = e.source === selected.id ? "→" : "←";
+                const prov = e.provenance || "extracted";
+                return (
+                  <div
+                    key={i}
+                    className="text-xs text-zinc-400 py-1 flex items-center gap-1 cursor-pointer hover:text-zinc-200"
+                    onClick={() => otherNode && setSelected(otherNode)}
+                  >
+                    <span>{direction}</span>
+                    <span className="font-medium text-zinc-300">{otherNode?.name || otherId}</span>
+                    <span className="text-zinc-600">({e.relation_type})</span>
+                    {prov !== "extracted" && (
+                      <span className="text-zinc-600 italic">[{prov}]</span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
+
+            {neighborNodes.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-zinc-800">
+                <p className="text-xs font-medium text-zinc-300 mb-2">Neighbors</p>
+                <div className="flex flex-wrap gap-1">
+                  {neighborNodes.map((n) => (
+                    <button
+                      key={n.id}
+                      onClick={() => setSelected(n)}
+                      className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200 truncate max-w-[120px]"
+                    >
+                      {n.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -273,22 +456,22 @@ export function KnowledgeGraphView() {
 function getDemoData(): { nodes: KGNode[]; edges: KGEdge[] } {
   return {
     nodes: [
-      { id: "1", name: "TurboFan", entity_type: "component", description: "High-bypass turbofan engine" },
-      { id: "2", name: "Compressor", entity_type: "component", description: "Multi-stage air compressor" },
-      { id: "3", name: "Combustion Chamber", entity_type: "component" },
-      { id: "4", name: "Blade Erosion", entity_type: "failure_mode", description: "Wear of fan blade surfaces" },
-      { id: "5", name: "Thermal Fatigue", entity_type: "failure_mode" },
-      { id: "6", name: "Inspection Proc", entity_type: "procedure", description: "Quarterly visual inspection" },
-      { id: "7", name: "AuthService", entity_type: "service", description: "OAuth2 authentication" },
-      { id: "8", name: "DataPipeline", entity_type: "service" },
+      { id: "1", name: "TurboFan", entity_type: "component", description: "High-bypass turbofan engine", community: 0 },
+      { id: "2", name: "Compressor", entity_type: "component", description: "Multi-stage air compressor", community: 0 },
+      { id: "3", name: "Combustion Chamber", entity_type: "component", community: 0 },
+      { id: "4", name: "Blade Erosion", entity_type: "failure_mode", description: "Wear of fan blade surfaces", community: 0 },
+      { id: "5", name: "Thermal Fatigue", entity_type: "failure_mode", community: 0 },
+      { id: "6", name: "Inspection Proc", entity_type: "procedure", description: "Quarterly visual inspection", community: 1 },
+      { id: "7", name: "AuthService", entity_type: "service", description: "OAuth2 authentication", community: 1 },
+      { id: "8", name: "DataPipeline", entity_type: "service", community: 1 },
     ],
     edges: [
-      { source: "1", target: "2", relation_type: "HAS_COMPONENT" },
-      { source: "1", target: "3", relation_type: "HAS_COMPONENT" },
-      { source: "2", target: "4", relation_type: "HAS_FAILURE_MODE" },
-      { source: "3", target: "5", relation_type: "HAS_FAILURE_MODE" },
-      { source: "4", target: "6", relation_type: "MITIGATED_BY" },
-      { source: "7", target: "8", relation_type: "DEPENDS_ON" },
+      { source: "1", target: "2", relation_type: "HAS_COMPONENT", provenance: "extracted" },
+      { source: "1", target: "3", relation_type: "HAS_COMPONENT", provenance: "extracted" },
+      { source: "2", target: "4", relation_type: "HAS_FAILURE_MODE", provenance: "extracted" },
+      { source: "3", target: "5", relation_type: "HAS_FAILURE_MODE", provenance: "inferred" },
+      { source: "4", target: "6", relation_type: "MITIGATED_BY", provenance: "inferred" },
+      { source: "7", target: "8", relation_type: "DEPENDS_ON", provenance: "ambiguous" },
     ],
   };
 }

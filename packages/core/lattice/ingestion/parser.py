@@ -110,6 +110,16 @@ def parse_content(content: str, source: str = "inline", doc_type: DocumentType =
 
 # --- Router ---
 
+def _get_code_parser():
+    from lattice.ingestion.code_parser import parse_code
+    return parse_code
+
+
+def _get_image_parser():
+    from lattice.ingestion.image_parser import parse_image
+    return parse_image
+
+
 PARSER_MAP: dict[str, callable] = {
     ".pdf": parse_pdf,
     ".md": parse_markdown,
@@ -117,10 +127,29 @@ PARSER_MAP: dict[str, callable] = {
     ".html": parse_html,
     ".htm": parse_html,
     ".txt": parse_text,
+    # Code files — routed to tree-sitter parser
+    ".py": "code",
+    ".js": "code",
+    ".jsx": "code",
+    ".ts": "code",
+    ".tsx": "code",
+    ".go": "code",
+    ".rs": "code",
+    ".java": "code",
+    ".c": "code",
+    ".cpp": "code",
+    ".h": "code",
+    ".hpp": "code",
+    # Image files — routed to vision parser
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".webp": "image",
+    ".gif": "image",
 }
 
 
-def parse_file(path: Path) -> Document:
+def parse_file(path: Path, llm_provider=None) -> Document:
     """Route a file to the appropriate parser based on extension."""
     path = Path(path)
     if not path.exists():
@@ -131,6 +160,11 @@ def parse_file(path: Path) -> Document:
     if parser is None:
         logger.warning("unsupported_format", path=str(path), extension=ext)
         return parse_text(path)
+
+    if parser == "code":
+        return _get_code_parser()(path)
+    if parser == "image":
+        return _get_image_parser()(path, llm_provider=llm_provider)
 
     return parser(path)
 

@@ -41,12 +41,14 @@ export interface KGNode {
   name: string;
   entity_type: string;
   description?: string;
+  community?: number | null;
 }
 
 export interface KGEdge {
   source: string;
   target: string;
   relation_type: string;
+  provenance?: string;
 }
 
 export async function submitTask(goal: string, approvalMode: string = "on_low_confidence"): Promise<Task> {

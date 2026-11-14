@@ -20,6 +20,8 @@ class DocumentType(str, Enum):
     MARKDOWN = "markdown"
     HTML = "html"
     TEXT = "text"
+    CODE = "code"
+    IMAGE = "image"
 
 
 class DocumentMetadata(BaseModel):

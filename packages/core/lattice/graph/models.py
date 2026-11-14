@@ -37,6 +37,7 @@ class Entity(BaseModel):
         default_factory=list,
         description="Chunk IDs this entity was extracted from (for traceability)",
     )
+    community: Optional[int] = Field(None, description="Community cluster ID from Leiden detection")
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -54,6 +55,10 @@ class Relation(BaseModel):
     properties: dict[str, Any] = Field(default_factory=dict)
     source_chunk_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(1.0, ge=0.0, le=1.0, description="Extraction confidence")
+    provenance: str = Field(
+        "extracted",
+        description="How this relation was derived: extracted (from source), inferred (deduced), ambiguous (uncertain)",
+    )
 
 
 class KGQueryResult(BaseModel):

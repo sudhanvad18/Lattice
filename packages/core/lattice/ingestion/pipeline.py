@@ -36,14 +36,34 @@ class IngestionPipeline:
         self,
         chunk_config: ChunkConfig | None = None,
         processors: list[ChunkProcessor] | None = None,
+        cache: "IngestionCache | None" = None,
+        llm_provider=None,
     ) -> None:
         self._chunker = ChunkingEngine(chunk_config)
         self._processors = processors or []
+        self._cache = cache
+        self._llm_provider = llm_provider
 
     def ingest_file(self, path: Path) -> list[Chunk]:
-        """Ingest a single file: parse → chunk → process."""
-        document = parse_file(path)
-        return self._process_document(document)
+        """Ingest a single file: parse → chunk → process.
+
+        Checks the content-hash cache first when available.
+        """
+        path = Path(path)
+
+        if self._cache is not None:
+            cached = self._cache.load(path)
+            if cached is not None:
+                logger.info("cache_hit", path=str(path), chunks=len(cached))
+                return cached
+
+        document = parse_file(path, llm_provider=self._llm_provider)
+        chunks = self._process_document(document)
+
+        if self._cache is not None:
+            self._cache.save(path, chunks)
+
+        return chunks
 
     def ingest_text(self, content: str, source: str = "inline") -> list[Chunk]:
         """Ingest raw text content directly."""
@@ -61,7 +81,11 @@ class IngestionPipeline:
         if not directory.is_dir():
             raise NotADirectoryError(f"Not a directory: {directory}")
 
-        valid_extensions = extensions or {".pdf", ".md", ".markdown", ".html", ".htm", ".txt"}
+        valid_extensions = extensions or {
+            ".pdf", ".md", ".markdown", ".html", ".htm", ".txt",
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp",
+            ".png", ".jpg", ".jpeg", ".webp", ".gif",
+        }
         all_chunks: list[Chunk] = []
         files_processed = 0
         files_skipped = 0

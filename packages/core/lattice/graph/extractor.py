@@ -177,6 +177,7 @@ class RuleBasedExtractor:
                             relation_type=rel_type,
                             source_chunk_ids=[chunk.id],
                             confidence=0.7,
+                            provenance="extracted",
                         )
                     )
 
@@ -198,6 +199,7 @@ class RuleBasedExtractor:
                             relation_type="HAS_SUBTOPIC",
                             source_chunk_ids=[chunk.id],
                             confidence=0.9,
+                            provenance="inferred",
                         )
                     )
 
@@ -216,3 +218,140 @@ class RuleBasedExtractor:
                 return entity
 
         return None
+
+
+class CodeExtractor:
+    """Extracts entities and relations from code AST metadata.
+
+    Reads the ast_nodes attached by code_parser and produces Function,
+    Class, Module entities with CALLS, IMPORTS, CONTAINS relations.
+    """
+
+    _ENTITY_NODE_TYPES = {
+        "function_definition", "function_declaration", "method_definition",
+        "arrow_function", "function_item",
+    }
+    _CLASS_NODE_TYPES = {
+        "class_definition", "class_declaration", "class_specifier",
+        "struct_item", "impl_item",
+    }
+    _IMPORT_NODE_TYPES = {
+        "import_statement", "import_from_statement", "import_declaration",
+        "use_declaration",
+    }
+    _CALL_NODE_TYPES = {"call_expression", "call"}
+
+    def extract(self, chunks: list[Chunk]) -> ExtractionResult:
+        """Extract code entities/relations from chunks with AST metadata."""
+        entities: dict[str, Entity] = {}
+        relations: list[Relation] = []
+
+        for chunk in chunks:
+            ast_nodes = chunk.metadata.extra.get("ast_nodes", [])
+            lang = chunk.metadata.extra.get("language", "unknown")
+            source = chunk.metadata.source
+
+            module_name = source.rsplit("/", 1)[-1] if "/" in source else source
+            if module_name not in entities:
+                mod_entity = Entity(
+                    name=module_name,
+                    entity_type="Module",
+                    properties={"language": lang},
+                    source_chunk_ids=[chunk.id],
+                )
+                entities[module_name] = mod_entity
+
+            container_stack: list[str] = [module_name]
+
+            for node in ast_nodes:
+                ntype = node.get("type", "")
+                name = node.get("name", "<anonymous>")
+                if name == "<anonymous>":
+                    continue
+
+                if ntype in self._ENTITY_NODE_TYPES:
+                    if name not in entities:
+                        entities[name] = Entity(
+                            name=name,
+                            entity_type="Function",
+                            properties={
+                                "language": lang,
+                                "start_line": node.get("start_line"),
+                                "end_line": node.get("end_line"),
+                            },
+                            source_chunk_ids=[chunk.id],
+                        )
+                    parent = entities.get(container_stack[-1])
+                    if parent:
+                        relations.append(Relation(
+                            source_id=parent.id,
+                            target_id=entities[name].id,
+                            relation_type="CONTAINS",
+                            source_chunk_ids=[chunk.id],
+                            provenance="extracted",
+                        ))
+
+                elif ntype in self._CLASS_NODE_TYPES:
+                    if name not in entities:
+                        entities[name] = Entity(
+                            name=name,
+                            entity_type="Class",
+                            properties={
+                                "language": lang,
+                                "start_line": node.get("start_line"),
+                                "end_line": node.get("end_line"),
+                            },
+                            source_chunk_ids=[chunk.id],
+                        )
+                    parent = entities.get(container_stack[-1])
+                    if parent:
+                        relations.append(Relation(
+                            source_id=parent.id,
+                            target_id=entities[name].id,
+                            relation_type="CONTAINS",
+                            source_chunk_ids=[chunk.id],
+                            provenance="extracted",
+                        ))
+                    container_stack.append(name)
+
+                elif ntype in self._IMPORT_NODE_TYPES:
+                    import_name = name.replace("import ", "").replace("from ", "").split(" ")[0]
+                    if import_name and import_name not in entities:
+                        entities[import_name] = Entity(
+                            name=import_name,
+                            entity_type="Module",
+                            properties={"language": lang, "imported": True},
+                            source_chunk_ids=[chunk.id],
+                        )
+                    mod = entities.get(module_name)
+                    imp = entities.get(import_name)
+                    if mod and imp:
+                        relations.append(Relation(
+                            source_id=mod.id,
+                            target_id=imp.id,
+                            relation_type="IMPORTS",
+                            source_chunk_ids=[chunk.id],
+                            provenance="extracted",
+                        ))
+
+                elif ntype in self._CALL_NODE_TYPES:
+                    if name not in entities:
+                        entities[name] = Entity(
+                            name=name,
+                            entity_type="Function",
+                            properties={"language": lang, "external": True},
+                            source_chunk_ids=[chunk.id],
+                        )
+                    caller = entities.get(container_stack[-1])
+                    callee = entities.get(name)
+                    if caller and callee and caller.id != callee.id:
+                        relations.append(Relation(
+                            source_id=caller.id,
+                            target_id=callee.id,
+                            relation_type="CALLS",
+                            source_chunk_ids=[chunk.id],
+                            provenance="extracted",
+                        ))
+
+        logger.info("code_extraction_complete", entities=len(entities), relations=len(relations))
+        return ExtractionResult(entities=list(entities.values()), relations=relations)

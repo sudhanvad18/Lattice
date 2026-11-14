@@ -164,13 +164,26 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
         ]
 
         if relevant:
+            # Use community membership to prioritize same-community entities
+            relevant_communities = {e.community for e in relevant if e.community is not None}
+            community_entities = [
+                e for e in all_entities
+                if e.community in relevant_communities and e not in relevant
+            ] if relevant_communities else []
+
             parts.append("Relevant entities:")
             for entity in relevant[:10]:
-                parts.append(f"  - {entity.name} ({entity.entity_type}): {entity.description or 'no description'}")
+                comm_label = f" [community {entity.community}]" if entity.community is not None else ""
+                parts.append(f"  - {entity.name} ({entity.entity_type}){comm_label}: {entity.description or 'no description'}")
 
                 neighbors = self._kg_backend.get_neighbors(entity.id)
                 for neighbor in neighbors.entities[:3]:
                     parts.append(f"    -> related to: {neighbor.name} ({neighbor.entity_type})")
+
+            if community_entities:
+                parts.append("\nRelated entities from same communities:")
+                for entity in community_entities[:5]:
+                    parts.append(f"  - {entity.name} ({entity.entity_type}) [community {entity.community}]")
 
         return "\n".join(parts)
 

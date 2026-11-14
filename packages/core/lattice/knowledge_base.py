@@ -26,6 +26,7 @@ import structlog
 from lattice.graph.builder import KnowledgeGraphBuilder
 from lattice.graph.engine import NetworkXBackend
 from lattice.graph.models import Entity, KGQueryResult, KGStats
+from lattice.ingestion.cache import IngestionCache
 from lattice.ingestion.chunker import ChunkConfig
 from lattice.ingestion.models import Chunk
 from lattice.ingestion.pipeline import IngestionPipeline
@@ -45,10 +46,12 @@ class KnowledgeBase:
         self,
         persist_dir: str | Path = "data",
         chunk_config: ChunkConfig | None = None,
+        enable_cache: bool = True,
     ) -> None:
         persist_path = Path(persist_dir)
 
-        self._pipeline = IngestionPipeline(chunk_config=chunk_config)
+        cache = IngestionCache(persist_path / "ingestion_cache") if enable_cache else None
+        self._pipeline = IngestionPipeline(chunk_config=chunk_config, cache=cache)
         self._vector_store = VectorStore(
             persist_dir=persist_path / "chroma",
             collection_name="lattice_chunks",
@@ -128,6 +131,15 @@ class KnowledgeBase:
 
         # Extract entities/relations and add to KG
         self._kg_builder.build_from_chunks(chunks)
+
+        # Update community clusters
+        try:
+            from lattice.graph.clustering import cluster_graph
+            cluster_graph(self._kg_builder.backend)
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug("clustering_skipped", reason=str(e))
 
         self._chunks.extend(chunks)
 

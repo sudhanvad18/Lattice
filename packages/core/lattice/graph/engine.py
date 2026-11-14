@@ -44,7 +44,14 @@ class KnowledgeGraphBackend(ABC):
     def get_all_entities(self) -> list[Entity]: ...
 
     @abstractmethod
+    def get_all_relations(self) -> list[Relation]: ...
+
+    @abstractmethod
     def get_entities_by_type(self, entity_type: str) -> list[Entity]: ...
+
+    def set_entity_community(self, entity_id: str, community_id: int) -> None:
+        """Set community cluster ID on an entity. Override in backends."""
+        ...
 
     @abstractmethod
     def get_neighbors(
@@ -105,6 +112,26 @@ class NetworkXBackend(KnowledgeGraphBackend):
     def get_all_entities(self) -> list[Entity]:
         return list(self._entities.values())
 
+    def get_all_relations(self) -> list[Relation]:
+        relations = []
+        for src, tgt, key, data in self._graph.edges(data=True, keys=True):
+            relations.append(Relation(
+                id=key,
+                source_id=src,
+                target_id=tgt,
+                relation_type=data.get("relation_type", ""),
+                properties=data.get("properties", {}),
+                confidence=data.get("confidence", 1.0),
+                provenance=data.get("provenance", "extracted"),
+            ))
+        return relations
+
+    def set_entity_community(self, entity_id: str, community_id: int) -> None:
+        if entity_id in self._entities:
+            self._entities[entity_id].community = community_id
+        if entity_id in self._graph:
+            self._graph.nodes[entity_id]["community"] = community_id
+
     def add_relation(self, relation: Relation) -> None:
         if relation.source_id not in self._graph:
             logger.warning("relation_source_missing", source_id=relation.source_id)
@@ -120,6 +147,7 @@ class NetworkXBackend(KnowledgeGraphBackend):
             relation_type=relation.relation_type,
             properties=relation.properties,
             confidence=relation.confidence,
+            provenance=relation.provenance,
         )
 
     def get_entity(self, entity_id: str) -> Optional[Entity]:

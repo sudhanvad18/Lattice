@@ -245,13 +245,32 @@ class HallucinationDetectionGuardrail:
             (e.description or "").lower() for e in all_entities
         )
 
+        # Build provenance weights from relations for entity-level scoring
+        provenance_weights: dict[str, float] = {}
+        try:
+            all_relations = self._kg.get_all_relations() if hasattr(self._kg, "get_all_relations") else []
+            for rel in all_relations:
+                weight = {"extracted": 1.0, "inferred": 0.5, "ambiguous": 0.25}.get(
+                    getattr(rel, "provenance", "extracted"), 0.5
+                )
+                for eid in (rel.source_id, rel.target_id):
+                    provenance_weights[eid] = max(provenance_weights.get(eid, 0.0), weight)
+        except Exception:
+            pass
+
         for claim in claims:
             claim_lower = claim.lower()
-            # A claim is "grounded" if key terms appear in the KG
             terms = [w for w in claim_lower.split() if len(w) > 4]
-            matches = sum(1 for t in terms if t in entity_names or t in entity_descriptions)
+            score = 0.0
+            for t in terms:
+                if t in entity_names:
+                    matched = [e for e in all_entities if e.name.lower() == t]
+                    w = max((provenance_weights.get(e.id, 1.0) for e in matched), default=1.0)
+                    score += w
+                elif t in entity_descriptions:
+                    score += 0.5
 
-            if matches >= max(1, len(terms) // 3):
+            if score >= max(1, len(terms) // 3):
                 grounded.append(claim)
             else:
                 ungrounded.append(claim)
