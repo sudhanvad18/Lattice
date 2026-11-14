@@ -11,6 +11,9 @@ Endpoints:
 - GET  /tasks/{id}/audit    Get audit trail
 - WS   /ws/{task_id}  Stream real-time task progress
 - GET  /health         Health check
+- GET  /kg/graph, /kg/stats, /kg/entities, /kg/entities/{entity_id}
+- GET  /kg/communities  Community detection
+- POST /kg/ingest       Ingest text
 """
 
 from __future__ import annotations
@@ -18,13 +21,15 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from lattice_api.audit import AuditTrail
+from lattice_api.graph_routes import get_knowledge_base as get_knowledge_base
+from lattice_api.graph_routes import router
 from lattice_api.models import (
     ArtifactResponse,
     HealthResponse,
@@ -33,6 +38,9 @@ from lattice_api.models import (
     TaskSubmitRequest,
 )
 from lattice_api.task_manager import TaskManager
+
+if TYPE_CHECKING:
+    from lattice.knowledge_base import KnowledgeBase
 
 logger = structlog.get_logger()
 
@@ -48,33 +56,50 @@ def get_task_manager() -> TaskManager:
     return _task_manager
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application startup/shutdown."""
-    global _task_manager, _audit_trail
-    _audit_trail = AuditTrail()
-    _task_manager = TaskManager(audit_trail=_audit_trail)
-    logger.info("lattice_api_started")
-    yield
-    logger.info("lattice_api_shutdown")
-
-
 # --- App Creation ---
 
 
-def create_app(task_manager: TaskManager | None = None) -> FastAPI:
+def create_app(
+    task_manager: TaskManager | None = None,
+    knowledge_base: KnowledgeBase | None = None,
+) -> FastAPI:
     """Create the FastAPI application.
 
-    Accepts an optional TaskManager for testing/dependency injection.
+    Accepts an optional TaskManager and caller-owned KnowledgeBase for injection.
     """
     global _task_manager, _audit_trail
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        global _task_manager, _audit_trail
+        kb = knowledge_base
+        if kb is None:
+            from lattice.config import get_settings
+            from lattice.knowledge_base import KnowledgeBase
+
+            kb = KnowledgeBase(persist_dir=get_settings().data_dir)
+        app.state.knowledge_base = kb
+        manager = task_manager or TaskManager(knowledge_base=kb)
+        _task_manager = manager
+        _audit_trail = manager.audit_trail
+        logger.info("lattice_api_started")
+        try:
+            yield
+        finally:
+            if knowledge_base is None:
+                kb.close()
+                app.state.knowledge_base = None
+            logger.info("lattice_api_shutdown")
 
     app = FastAPI(
         title="Lattice Agent Platform",
         description="Autonomous multi-agent orchestration with write-back capabilities",
         version="0.1.0",
-        lifespan=lifespan if task_manager is None else None,
+        lifespan=lifespan,
     )
+
+    app.state.knowledge_base = knowledge_base
+    app.include_router(router)
 
     if task_manager:
         _task_manager = task_manager
@@ -103,7 +128,17 @@ def create_app(task_manager: TaskManager | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     async def health():
+        kb = app.state.knowledge_base
+        kb_health = None
+        if kb is not None:
+            stats = kb.stats
+            kb_health = {
+                "backend": type(kb.graph).__name__,
+                "entities": stats["kg_entities"],
+                "chunks": stats["chunks_stored"],
+            }
         return HealthResponse(
+            knowledge_base=kb_health,
             status="healthy",
             version="0.1.0",
             agents_available=["orchestrator", "researcher", "writer", "reviewer", "code", "ingestion"],

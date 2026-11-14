@@ -65,6 +65,12 @@ class TaskResultResponse(BaseModel):
     audit_trail: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class KnowledgeBaseHealth(BaseModel):
+    backend: str
+    entities: int
+    chunks: int
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
 
@@ -72,6 +78,7 @@ class HealthResponse(BaseModel):
     version: str = "0.1.0"
     agents_available: list[str] = Field(default_factory=list)
     providers_configured: list[str] = Field(default_factory=list)
+    knowledge_base: KnowledgeBaseHealth | None = None
 
 
 class WebSocketMessage(BaseModel):
@@ -81,3 +88,74 @@ class WebSocketMessage(BaseModel):
     task_id: str
     data: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Node(BaseModel):
+    id: str
+    name: str
+    entity_type: str
+    description: str | None = None
+    community: int | None = None
+
+
+class Edge(BaseModel):
+    id: str
+    source: str
+    target: str
+    relation_type: str
+    provenance: str
+    confidence: float
+
+
+class GraphResponse(BaseModel):
+    nodes: list[Node]
+    edges: list[Edge]
+    truncated: bool
+
+
+class GraphStatsResponse(BaseModel):
+    chunks_stored: int
+    kg_entities: int
+    kg_relations: int
+    kg_entity_types: dict[str, int]
+    kg_relation_types: dict[str, int]
+    backend: str
+
+
+class EntityDetailResponse(BaseModel):
+    entity: Node
+    neighbors: list[Node]
+    relations: list[Edge]
+
+
+class EntityReference(BaseModel):
+    id: str
+    name: str
+
+
+class Community(BaseModel):
+    id: int
+    size: int
+    members: list[EntityReference]
+
+
+class SurprisingConnection(BaseModel):
+    source: str
+    target: str
+    explanation: str
+
+
+class CommunitiesResponse(BaseModel):
+    communities: list[Community]
+    god_nodes: list[EntityReference]
+    surprising_connections: list[SurprisingConnection]
+
+
+class IngestRequest(BaseModel):
+    text: str = Field(min_length=1)
+    source: str = "api"
+
+
+class IngestResponse(BaseModel):
+    chunks: int
+    stats: dict[str, Any]

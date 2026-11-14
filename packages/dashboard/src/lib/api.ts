@@ -40,11 +40,13 @@ export interface KGNode {
   id: string;
   name: string;
   entity_type: string;
-  description?: string;
+  description?: string | null;
   community?: number | null;
 }
 
 export interface KGEdge {
+  id: string;
+  confidence: number;
   source: string;
   target: string;
   relation_type: string;
@@ -80,9 +82,61 @@ export async function getEvalResults(): Promise<EvalResult[]> {
   return res.json();
 }
 
-export async function getKnowledgeGraph(): Promise<{ nodes: KGNode[]; edges: KGEdge[] }> {
-  const res = await fetch(`${API_BASE}/kg/graph`);
+export interface KnowledgeGraph {
+  nodes: KGNode[];
+  edges: KGEdge[];
+  truncated: boolean;
+}
+
+export interface GraphStats {
+  backend: string;
+  chunks_stored: number;
+  kg_entities: number;
+  kg_relations: number;
+  kg_entity_types: Record<string, number>;
+  kg_relation_types: Record<string, number>;
+}
+
+export interface EntityDetail {
+  entity: KGNode;
+  neighbors: KGNode[];
+  relations: KGEdge[];
+}
+
+export interface Communities {
+  communities: { id: number; size: number; members: { id: string; name: string }[] }[];
+  god_nodes: { id: string; name: string }[];
+  surprising_connections: { source: string; target: string; explanation: string }[];
+}
+
+async function graphRequest<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}/kg/${path}`, options);
+  if (!res.ok) throw new Error(`Knowledge graph request failed (${res.status})`);
   return res.json();
+}
+
+export function getKnowledgeGraph(limit = 500): Promise<KnowledgeGraph> {
+  return graphRequest(`graph?limit=${limit}`);
+}
+
+export function getGraphStats(): Promise<GraphStats> {
+  return graphRequest("stats");
+}
+
+export function getEntityDetail(id: string): Promise<EntityDetail> {
+  return graphRequest(`entities/${encodeURIComponent(id)}`);
+}
+
+export function getCommunities(): Promise<Communities> {
+  return graphRequest("communities");
+}
+
+export function ingestText(text: string, source = "api"): Promise<{ chunks: number; stats: Omit<GraphStats, "backend"> }> {
+  return graphRequest("ingest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, source }),
+  });
 }
 
 export async function chatQuery(message: string): Promise<{ response: string; citations: string[] }> {

@@ -11,8 +11,9 @@ Manages the lifecycle of submitted tasks:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -26,6 +27,9 @@ from lattice.inference.provider import LLMProvider, get_provider
 from lattice.writeback import ApprovalGate, ApprovalMode, WriteBackEngine
 
 from lattice_api.audit import AuditEventType, AuditTrail
+
+if TYPE_CHECKING:
+    from lattice.knowledge_base import KnowledgeBase
 
 logger = structlog.get_logger()
 
@@ -41,7 +45,9 @@ class TaskManager:
         checkpoint_store: CheckpointStore | None = None,
         writeback_engine: WriteBackEngine | None = None,
         audit_trail: AuditTrail | None = None,
+        knowledge_base: KnowledgeBase | None = None,
     ) -> None:
+        self._knowledge_base = knowledge_base
         self._provider = provider
         self._checkpoint_store = checkpoint_store or LocalCheckpointStore()
         self._writeback_engine = writeback_engine
@@ -104,7 +110,13 @@ class TaskManager:
 
             orchestrator = OrchestratorAgent(
                 provider=provider,
-                researcher=ResearcherAgent(provider=provider),
+                researcher=ResearcherAgent(
+                    provider=provider,
+                    **({
+                        "vector_store": self._knowledge_base.vector_store,
+                        "kg_backend": self._knowledge_base.graph,
+                    } if self._knowledge_base is not None else {}),
+                ),
                 writer=WriterAgent(provider=provider),
                 reviewer=ReviewerAgent(provider=provider),
             )
