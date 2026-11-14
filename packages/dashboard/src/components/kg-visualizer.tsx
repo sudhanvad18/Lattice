@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import { Network as NetworkIcon, Search, ZoomIn, ZoomOut, Maximize2, X } from "lucide-react";
-import { getKnowledgeGraph, KGNode, KGEdge } from "@/lib/api";
+import { Search, ZoomIn, ZoomOut, Maximize2, X } from "lucide-react";
+import { getKnowledgeGraph, getEntityDetail, ingestText, EntityDetail, KGNode, KGEdge } from "@/lib/api";
 
 const COMMUNITY_PALETTE = [
   "#34d399", "#60a5fa", "#f87171", "#a78bfa", "#fbbf24",
@@ -29,6 +29,12 @@ export function KnowledgeGraphView() {
   const [edges, setEdges] = useState<KGEdge[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
+  const [demo, setDemo] = useState(false);
+  const [text, setText] = useState("");
+  const [ingesting, setIngesting] = useState(false);
+  const [detail, setDetail] = useState<EntityDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [selected, setSelected] = useState<KGNode | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [zoom, setZoom] = useState(1);
@@ -39,102 +45,65 @@ export function KnowledgeGraphView() {
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
 
-  useEffect(() => {
-    loadGraph();
-    return () => cancelAnimationFrame(animRef.current);
-  }, []);
-
-  const loadGraph = async () => {
-    try {
-      const data = await getKnowledgeGraph();
+  const loadGraph = useCallback(() => {
+    return getKnowledgeGraph().then((data) => {
       setNodes(data.nodes);
       setEdges(data.edges);
-      initPositions(data.nodes, data.edges);
-    } catch {
-      setError("Could not connect to API. Using demo data.");
-      const demo = getDemoData();
-      setNodes(demo.nodes);
-      setEdges(demo.edges);
-      initPositions(demo.nodes, demo.edges);
-    } finally {
+      setTruncated(data.truncated);
+      setDemo(false);
+      setError(null);
+    }).catch((err: unknown) => {
+      const unreachable = err instanceof TypeError;
+      setDemo(unreachable);
+      setTruncated(false);
+      const data = unreachable ? getDemoData() : { nodes: [], edges: [] };
+      setNodes(data.nodes);
+      setEdges(data.edges);
+      setError(unreachable ? "Could not connect to API. Using demo data." : "Could not load knowledge graph. Please try again.");
+    }).finally(() => {
       setLoading(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    void loadGraph();
+  }, [loadGraph]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (selected && !demo) {
+      getEntityDetail(selected.id).then((data) => {
+        if (!cancelled) {
+          setDetail(data);
+          setDetailError(null);
+        }
+      }).catch(() => {
+        if (!cancelled) setDetailError("Could not load entity details.");
+      });
+    }
+    return () => { cancelled = true; };
+  }, [selected, demo]);
+
+  const handleIngest = async () => {
+    setIngesting(true);
+    try {
+      await ingestText(text);
+      setText("");
+      await loadGraph();
+    } catch {
+      setError("Could not ingest text. Please try again.");
+    } finally {
+      setIngesting(false);
     }
   };
 
-  const initPositions = (initNodes: KGNode[], initEdges: KGEdge[]) => {
-    const width = 800;
-    const height = 600;
-    positionsRef.current = initNodes.map((node) => ({
-      x: width / 2 + (Math.random() - 0.5) * 400,
-      y: height / 2 + (Math.random() - 0.5) * 300,
-      vx: 0,
-      vy: 0,
-      node,
+  useEffect(() => {
+    positionsRef.current = nodes.map((node) => ({
+      x: 400 + (Math.random() - 0.5) * 400,
+      y: 300 + (Math.random() - 0.5) * 300,
+      vx: 0, vy: 0, node,
     }));
-    startSimulation(initEdges);
-  };
-
-  const startSimulation = useCallback((simEdges: KGEdge[]) => {
-    let ticks = 0;
-    const maxTicks = 250;
-
-    const tick = () => {
-      if (ticks >= maxTicks) return;
-      ticks++;
-
-      const positions = positionsRef.current;
-      const width = 800;
-      const height = 600;
-
-      for (let i = 0; i < positions.length; i++) {
-        for (let j = i + 1; j < positions.length; j++) {
-          const dx = positions[j].x - positions[i].x;
-          const dy = positions[j].y - positions[i].y;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          const force = 3000 / (dist * dist);
-          const fx = (dx / dist) * force;
-          const fy = (dy / dist) * force;
-          positions[i].vx -= fx;
-          positions[i].vy -= fy;
-          positions[j].vx += fx;
-          positions[j].vy += fy;
-        }
-      }
-
-      for (const edge of simEdges) {
-        const si = positions.findIndex((p) => p.node.id === edge.source);
-        const ti = positions.findIndex((p) => p.node.id === edge.target);
-        if (si === -1 || ti === -1) continue;
-        const dx = positions[ti].x - positions[si].x;
-        const dy = positions[ti].y - positions[si].y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const force = (dist - 120) * 0.01;
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        positions[si].vx += fx;
-        positions[si].vy += fy;
-        positions[ti].vx -= fx;
-        positions[ti].vy -= fy;
-      }
-
-      for (const p of positions) {
-        p.vx += (width / 2 - p.x) * 0.001;
-        p.vy += (height / 2 - p.y) * 0.001;
-        p.vx *= 0.85;
-        p.vy *= 0.85;
-        p.x += p.vx;
-        p.y += p.vy;
-        p.x = Math.max(40, Math.min(width - 40, p.x));
-        p.y = Math.max(40, Math.min(height - 40, p.y));
-      }
-
-      draw();
-      animRef.current = requestAnimationFrame(tick);
-    };
-
-    cancelAnimationFrame(animRef.current);
-    tick();
-  }, []);
+  }, [nodes]);
 
   const nodeColor = (node: KGNode): string => {
     if (node.community != null) {
@@ -236,7 +205,77 @@ export function KnowledgeGraphView() {
     ctx.restore();
   }, [edges, zoom, panOffset, searchQuery, selected]);
 
-  useEffect(() => { draw(); }, [draw]);
+  useEffect(() => {
+    const simEdges = edges;
+    let ticks = 0;
+    const maxTicks = 250;
+
+    const tick = () => {
+      if (ticks >= maxTicks) return;
+      ticks++;
+
+      const positions = positionsRef.current;
+      const width = 800;
+      const height = 600;
+
+      for (let i = 0; i < positions.length; i++) {
+        for (let j = i + 1; j < positions.length; j++) {
+          const dx = positions[j].x - positions[i].x;
+          const dy = positions[j].y - positions[i].y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const force = 3000 / (dist * dist);
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          positions[i].vx -= fx;
+          positions[i].vy -= fy;
+          positions[j].vx += fx;
+          positions[j].vy += fy;
+        }
+      }
+
+      for (const edge of simEdges) {
+        const si = positions.findIndex((p) => p.node.id === edge.source);
+        const ti = positions.findIndex((p) => p.node.id === edge.target);
+        if (si === -1 || ti === -1) continue;
+        const dx = positions[ti].x - positions[si].x;
+        const dy = positions[ti].y - positions[si].y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const force = (dist - 120) * 0.01;
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        positions[si].vx += fx;
+        positions[si].vy += fy;
+        positions[ti].vx -= fx;
+        positions[ti].vy -= fy;
+      }
+
+      for (const p of positions) {
+        p.vx += (width / 2 - p.x) * 0.001;
+        p.vy += (height / 2 - p.y) * 0.001;
+        p.vx *= 0.85;
+        p.vy *= 0.85;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.x = Math.max(40, Math.min(width - 40, p.x));
+        p.y = Math.max(40, Math.min(height - 40, p.y));
+      }
+
+      draw();
+      animRef.current = requestAnimationFrame(tick);
+    };
+
+    cancelAnimationFrame(animRef.current);
+    tick();
+    return () => cancelAnimationFrame(animRef.current);
+  }, [draw, edges, nodes]);
+
+
+
+  const selectNode = (node: KGNode | null) => {
+    setSelected(node);
+    setDetail(null);
+    setDetailError(null);
+  };
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (isDragging.current) return;
@@ -252,7 +291,7 @@ export function KnowledgeGraphView() {
       return dx * dx + dy * dy < 200;
     });
 
-    setSelected(clicked?.node ?? null);
+    selectNode(clicked?.node ?? null);
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -283,8 +322,10 @@ export function KnowledgeGraphView() {
           .filter((id) => id !== selected.id)
       )
     : new Set<string>();
-  const neighborNodes = nodes.filter((n) => neighborIds.has(n.id));
-  const selectedEdges = selected ? edges.filter((e) => e.source === selected.id || e.target === selected.id) : [];
+  const liveDetail = !demo && detail?.entity.id === selected?.id ? detail : null;
+  const panelEntity = liveDetail?.entity ?? selected;
+  const neighborNodes = liveDetail?.neighbors ?? nodes.filter((n) => neighborIds.has(n.id));
+  const selectedEdges = liveDetail?.relations ?? (selected ? edges.filter((e) => e.source === selected.id || e.target === selected.id) : []);
 
   if (loading) {
     return (
@@ -302,6 +343,7 @@ export function KnowledgeGraphView() {
           <p className="text-zinc-400 text-sm mt-1">
             {nodes.length} entities · {edges.length} relations
             {communities.length > 0 && ` · ${communities.length} communities`}
+            {truncated && " · truncated"}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -335,6 +377,18 @@ export function KnowledgeGraphView() {
       {error && (
         <div className="mb-3 px-3 py-2 bg-amber-950/30 border border-amber-800 rounded-lg text-xs text-amber-300">
           {error}
+        </div>
+      )}
+
+      {!demo && nodes.length === 0 && (
+        <div className="mb-4 p-4 bg-zinc-900 border border-zinc-800 rounded-xl text-sm text-zinc-400">
+          <p>Knowledge graph is empty. Ingest documents with <code>lattice ingest &lt;dir&gt;</code> or paste text below.</p>
+          <textarea aria-label="Text to ingest" value={text} onChange={(e) => setText(e.target.value)} rows={3}
+            className="mt-3 w-full p-2 bg-zinc-800 border border-zinc-700 rounded-lg" />
+          <button onClick={handleIngest} disabled={ingesting || !text.trim()}
+            className="mt-2 px-3 py-1.5 bg-zinc-800 rounded-lg disabled:opacity-50">
+            {ingesting ? "Ingesting..." : "Ingest"}
+          </button>
         </div>
       )}
 
@@ -382,8 +436,8 @@ export function KnowledgeGraphView() {
         {selected && (
           <div className="w-72 bg-zinc-900 border border-zinc-800 rounded-xl p-4 overflow-y-auto">
             <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-sm truncate">{selected.name}</h3>
-              <button onClick={() => setSelected(null)} className="text-zinc-500 hover:text-zinc-300">
+              <h3 className="font-semibold text-sm truncate">{panelEntity?.name}</h3>
+              <button onClick={() => selectNode(null)} className="text-zinc-500 hover:text-zinc-300">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -400,24 +454,25 @@ export function KnowledgeGraphView() {
                 </span>
               )}
             </div>
-            {selected.description && (
-              <p className="text-xs text-zinc-400 mt-3">{selected.description}</p>
+            {panelEntity?.description && (
+              <p className="text-xs text-zinc-400 mt-3">{panelEntity.description}</p>
             )}
 
+            {detailError && <p className="mt-3 text-xs text-amber-300">{detailError}</p>}
             <div className="mt-4 pt-3 border-t border-zinc-800">
               <p className="text-xs font-medium text-zinc-300 mb-2">
                 Connections ({selectedEdges.length})
               </p>
               {selectedEdges.map((e, i) => {
                 const otherId = e.source === selected.id ? e.target : e.source;
-                const otherNode = nodes.find((n) => n.id === otherId);
+                const otherNode = neighborNodes.find((n) => n.id === otherId) ?? nodes.find((n) => n.id === otherId);
                 const direction = e.source === selected.id ? "→" : "←";
                 const prov = e.provenance || "extracted";
                 return (
                   <div
                     key={i}
                     className="text-xs text-zinc-400 py-1 flex items-center gap-1 cursor-pointer hover:text-zinc-200"
-                    onClick={() => otherNode && setSelected(otherNode)}
+                    onClick={() => otherNode && selectNode(otherNode)}
                   >
                     <span>{direction}</span>
                     <span className="font-medium text-zinc-300">{otherNode?.name || otherId}</span>
@@ -437,7 +492,7 @@ export function KnowledgeGraphView() {
                   {neighborNodes.map((n) => (
                     <button
                       key={n.id}
-                      onClick={() => setSelected(n)}
+                      onClick={() => selectNode(n)}
                       className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200 truncate max-w-[120px]"
                     >
                       {n.name}
@@ -466,12 +521,12 @@ function getDemoData(): { nodes: KGNode[]; edges: KGEdge[] } {
       { id: "8", name: "DataPipeline", entity_type: "service", community: 1 },
     ],
     edges: [
-      { source: "1", target: "2", relation_type: "HAS_COMPONENT", provenance: "extracted" },
-      { source: "1", target: "3", relation_type: "HAS_COMPONENT", provenance: "extracted" },
-      { source: "2", target: "4", relation_type: "HAS_FAILURE_MODE", provenance: "extracted" },
-      { source: "3", target: "5", relation_type: "HAS_FAILURE_MODE", provenance: "inferred" },
-      { source: "4", target: "6", relation_type: "MITIGATED_BY", provenance: "inferred" },
-      { source: "7", target: "8", relation_type: "DEPENDS_ON", provenance: "ambiguous" },
+      { id: "demo-1", confidence: 1, source: "1", target: "2", relation_type: "HAS_COMPONENT", provenance: "extracted" },
+      { id: "demo-2", confidence: 1, source: "1", target: "3", relation_type: "HAS_COMPONENT", provenance: "extracted" },
+      { id: "demo-3", confidence: 1, source: "2", target: "4", relation_type: "HAS_FAILURE_MODE", provenance: "extracted" },
+      { id: "demo-4", confidence: 1, source: "3", target: "5", relation_type: "HAS_FAILURE_MODE", provenance: "inferred" },
+      { id: "demo-5", confidence: 1, source: "4", target: "6", relation_type: "MITIGATED_BY", provenance: "inferred" },
+      { id: "demo-6", confidence: 1, source: "7", target: "8", relation_type: "DEPENDS_ON", provenance: "ambiguous" },
     ],
   };
 }
