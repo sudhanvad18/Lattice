@@ -16,8 +16,10 @@ from lattice.agents.orchestrator import OrchestratorAgent
 from lattice.agents.researcher import ResearcherAgent
 from lattice.agents.state import TaskStatus
 from lattice.config import InferenceProvider, get_settings
+from lattice.evaluation import DEMO_BENCHMARK_TASKS, EvaluationEngine, save_report
 from lattice.graph.clustering import cluster_graph
 from lattice.guardrails import GuardrailRunner
+from lattice.inference.mock import MockProvider
 from lattice.inference.provider import get_provider
 from lattice.ingestion.cache import IngestionCache
 from lattice.knowledge_base import KnowledgeBase
@@ -199,6 +201,39 @@ def run(ctx: click.Context, task: str, provider: str | None, model: str | None,
         ])
     if result.status == TaskStatus.FAILED:
         ctx.exit(1)
+
+
+@main.command("eval")
+@click.option("--provider", type=click.Choice(["ollama", "anthropic", "openai", "mock"]),
+              help="LLM provider; 'mock' runs offline to exercise the pipeline.")
+@click.option("--model", help="Override the provider's default model.")
+@click.option("--task", "task_ids", multiple=True, help="Run only these benchmark task ids.")
+@click.pass_context
+def eval_command(ctx: click.Context, provider: str | None, model: str | None,
+                 task_ids: tuple[str, ...]) -> None:
+    """Run the built-in benchmark and save results for the dashboard."""
+    tasks = [t for t in DEMO_BENCHMARK_TASKS if not task_ids or t.id in task_ids]
+    if not tasks:
+        raise click.BadParameter(f"unknown task id(s): {', '.join(task_ids)}", param_hint="--task")
+
+    if provider == "mock":
+        llm = MockProvider()
+    else:
+        llm = get_provider(
+            InferenceProvider(provider) if provider else None,
+            **({"model": model} if model else {}),
+        )
+    report = asyncio.run(EvaluationEngine(llm).run_benchmark(tasks))
+
+    path = Path(ctx.obj["data_dir"]) / "eval" / "latest.json"
+    save_report(report, path, provider=provider or get_settings().default_provider.value,
+                model=model or getattr(llm, "model", None))
+    _table("Benchmark", ("Task", "Status", "Passed", "Quality", "Keyword recall", "Latency"), [
+        (r.task_id, r.status, "yes" if r.passed else "no", f"{r.review_confidence:.2f}",
+         f"{r.keyword_recall:.0%}", f"{r.elapsed_seconds:.1f}s")
+        for r in report.results
+    ])
+    console.print(f"Pass rate {report.pass_rate:.0%}. Results saved to {path}")
 
 
 @main.command()

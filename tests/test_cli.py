@@ -153,6 +153,21 @@ def test_serve(invoke, monkeypatch, tmp_path):
     ]
 
 
+def test_eval_saves_results(invoke, tmp_path):
+    result = invoke("eval", "--provider", "mock", "--task", "doc-api")
+    assert result.exit_code == 0, result.output
+
+    saved = json.loads((tmp_path / "eval" / "latest.json").read_text())
+    assert saved["provider"] == "mock"
+    assert [r["task_id"] for r in saved["results"]] == ["doc-api"]
+
+
+def test_eval_rejects_unknown_task(invoke):
+    result = invoke("eval", "--provider", "mock", "--task", "nope")
+    assert result.exit_code == 2
+    assert "unknown task id" in result.output
+
+
 def test_subcommand_help_exits_cleanly(invoke):
     result = invoke("serve", "--help")
     assert result.exit_code == 0

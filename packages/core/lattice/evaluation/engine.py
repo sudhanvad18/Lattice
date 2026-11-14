@@ -18,8 +18,12 @@ Supports comparing:
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -73,6 +77,23 @@ class EvalResult:
     @property
     def passed(self) -> bool:
         return self.completed and self.review_approved and self.keyword_recall >= 0.5
+
+    def to_record(self) -> dict[str, Any]:
+        """Flat JSON-serializable view used by the CLI, API, and dashboard."""
+        return {
+            "task_id": self.task_id,
+            "task_name": self.task_description,
+            "status": self.status,
+            "completed": self.completed,
+            "passed": self.passed,
+            "quality_score": self.review_confidence,
+            "keyword_recall": self.keyword_recall,
+            "keywords_missing": self.keywords_missing,
+            "latency_seconds": self.elapsed_seconds,
+            "iterations": self.iterations_used,
+            "artifact_count": self.artifact_count,
+            "errors": self.errors,
+        }
 
 
 @dataclass
@@ -186,6 +207,40 @@ class EvaluationEngine:
 
         logger.info("benchmark_complete", **report.summary())
         return report
+
+
+def save_report(report: BenchmarkReport, path: Path, **run_info: Any) -> dict[str, Any]:
+    """Write a benchmark run to ``path`` atomically and return the stored payload."""
+    payload = {
+        "run_at": datetime.now(UTC).isoformat(),
+        **run_info,
+        "summary": {
+            "total_tasks": report.total_tasks,
+            "completion_rate": report.completion_rate,
+            "pass_rate": report.pass_rate,
+            "avg_iterations": report.avg_iterations,
+            "avg_latency_seconds": report.avg_latency_seconds,
+            "avg_keyword_recall": report.avg_keyword_recall,
+            "avg_review_confidence": report.avg_review_confidence,
+        },
+        "results": [r.to_record() for r in report.results],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(tmp, path)
+    return payload
+
+
+def load_report(path: Path) -> dict[str, Any] | None:
+    """Return the stored benchmark run, or None when no valid run exists."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return None
+    return payload
 
 
 # --- Built-in benchmark tasks ---

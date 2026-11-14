@@ -410,3 +410,23 @@ class TestOrchestrator:
         # Should have more than one document artifact (original + revision)
         docs = result.get_artifacts_by_type("document")
         assert len(docs) >= 2
+
+    @pytest.mark.asyncio
+    async def test_persistent_rejection_stops_at_max_iterations(self):
+        """A reviewer that never approves must not loop the writer forever."""
+        rejection = json.dumps({
+            "approved": False, "confidence": 0.5, "issues": ["Still wrong"],
+            "suggestions": [], "reasoning": "Rejected.",
+        })
+        responses = [
+            json.dumps({"subtasks": [
+                {"description": "Write report", "assigned_to": "writer", "depends_on": []},
+            ]}),
+        ] + ["Draft", rejection] * 50
+        orchestrator = OrchestratorAgent(provider=MockProvider(responses=responses))
+
+        result = await orchestrator.run("Write a report", max_iterations=4)
+
+        assert result.iteration_count == 4
+        assert len(result.reviews) == 3
+        assert all(not review.approved for review in result.reviews)

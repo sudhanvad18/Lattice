@@ -16,6 +16,7 @@ import { KnowledgeGraphView } from "@/components/kg-visualizer";
 import { EvalDashboard } from "@/components/eval-dashboard";
 import { ChatInterface } from "@/components/chat-interface";
 import { TaskHistory } from "@/components/task-history";
+import { ViewErrorBoundary } from "@/components/error-boundary";
 
 type View = "tasks" | "activity" | "graph" | "eval" | "chat" | "history";
 
@@ -68,12 +69,14 @@ export default function Dashboard() {
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
-        {view === "tasks" && <TaskSubmission />}
-        {view === "activity" && <ActivityFeed />}
-        {view === "graph" && <KnowledgeGraphView />}
-        {view === "eval" && <EvalDashboard />}
-        {view === "chat" && <ChatInterface />}
-        {view === "history" && <TaskHistory />}
+        <ViewErrorBoundary key={view} label={NAV_ITEMS.find((item) => item.id === view)?.label ?? view}>
+          {view === "tasks" && <TaskSubmission />}
+          {view === "activity" && <ActivityFeed />}
+          {view === "graph" && <KnowledgeGraphView />}
+          {view === "eval" && <EvalDashboard />}
+          {view === "chat" && <ChatInterface />}
+          {view === "history" && <TaskHistory />}
+        </ViewErrorBoundary>
       </main>
     </div>
   );

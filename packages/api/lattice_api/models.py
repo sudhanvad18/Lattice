@@ -159,3 +159,38 @@ class IngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     chunks: int
     stats: dict[str, Any]
+
+
+class EvalTaskResult(BaseModel):
+    task_id: str
+    task_name: str
+    status: str
+    completed: bool
+    passed: bool
+    quality_score: float
+    keyword_recall: float
+    keywords_missing: list[str] = Field(default_factory=list)
+    latency_seconds: float
+    iterations: int
+    artifact_count: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class EvalSummary(BaseModel):
+    total_tasks: int
+    completion_rate: float
+    pass_rate: float
+    avg_iterations: float
+    avg_latency_seconds: float
+    avg_keyword_recall: float
+    avg_review_confidence: float
+
+
+class EvalRunResponse(BaseModel):
+    """Latest ``lattice eval`` run; ``run_at`` is None when no run exists yet."""
+
+    run_at: datetime | None = None
+    provider: str | None = None
+    model: str | None = None
+    summary: EvalSummary | None = None
+    results: list[EvalTaskResult] = Field(default_factory=list)

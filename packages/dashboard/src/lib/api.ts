@@ -28,12 +28,48 @@ export interface AgentEvent {
 }
 
 export interface EvalResult {
+  task_id: string;
   task_name: string;
+  status: string;
   completed: boolean;
+  passed: boolean;
   quality_score: number;
-  citation_accuracy: number;
+  keyword_recall: number;
+  keywords_missing: string[];
   latency_seconds: number;
   iterations: number;
+  artifact_count: number;
+  errors: string[];
+}
+
+export interface EvalSummary {
+  total_tasks: number;
+  completion_rate: number;
+  pass_rate: number;
+  avg_iterations: number;
+  avg_latency_seconds: number;
+  avg_keyword_recall: number;
+  avg_review_confidence: number;
+}
+
+export interface EvalRun {
+  run_at: string | null;
+  provider: string | null;
+  model: string | null;
+  summary: EvalSummary | null;
+  results: EvalResult[];
+}
+
+export class ApiError extends Error {
+  constructor(public status: number, path: string) {
+    super(`Request to ${path} failed (${status})`);
+  }
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...options });
+  if (!res.ok) throw new ApiError(res.status, path);
+  return res.json();
 }
 
 export interface KGNode {
@@ -53,33 +89,28 @@ export interface KGEdge {
   provenance?: string;
 }
 
-export async function submitTask(goal: string, approvalMode: string = "on_low_confidence"): Promise<Task> {
-  const res = await fetch(`${API_BASE}/tasks`, {
+export function submitTask(goal: string, approvalMode: string = "on_low_confidence"): Promise<Task> {
+  return request("/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ goal, approval_mode: approvalMode }),
   });
-  return res.json();
 }
 
-export async function getTasks(): Promise<Task[]> {
-  const res = await fetch(`${API_BASE}/tasks`);
-  return res.json();
+export function getTasks(): Promise<Task[]> {
+  return request("/tasks");
 }
 
-export async function getTask(id: string): Promise<Task & { artifacts: Artifact[] }> {
-  const res = await fetch(`${API_BASE}/tasks/${id}`);
-  return res.json();
+export function getTask(id: string): Promise<Task & { artifacts: Artifact[] }> {
+  return request(`/tasks/${id}`);
 }
 
-export async function getAuditTrail(taskId: string): Promise<AgentEvent[]> {
-  const res = await fetch(`${API_BASE}/tasks/${taskId}/audit`);
-  return res.json();
+export function getAuditTrail(taskId: string): Promise<AgentEvent[]> {
+  return request(`/tasks/${taskId}/audit`);
 }
 
-export async function getEvalResults(): Promise<EvalResult[]> {
-  const res = await fetch(`${API_BASE}/eval/results`);
-  return res.json();
+export function getEvalResults(): Promise<EvalRun> {
+  return request("/eval/results");
 }
 
 export interface KnowledgeGraph {
@@ -109,10 +140,8 @@ export interface Communities {
   surprising_connections: { source: string; target: string; explanation: string }[];
 }
 
-async function graphRequest<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}/kg/${path}`, options);
-  if (!res.ok) throw new Error(`Knowledge graph request failed (${res.status})`);
-  return res.json();
+function graphRequest<T>(path: string, options?: RequestInit): Promise<T> {
+  return request(`/kg/${path}`, options);
 }
 
 export function getKnowledgeGraph(limit = 500): Promise<KnowledgeGraph> {
@@ -139,13 +168,12 @@ export function ingestText(text: string, source = "api"): Promise<{ chunks: numb
   });
 }
 
-export async function chatQuery(message: string): Promise<{ response: string; citations: string[] }> {
-  const res = await fetch(`${API_BASE}/chat`, {
+export function chatQuery(message: string): Promise<{ response: string; citations: string[] }> {
+  return request("/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message }),
   });
-  return res.json();
 }
 
 export function createWebSocket(taskId?: string): WebSocket {

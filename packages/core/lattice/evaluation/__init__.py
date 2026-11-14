@@ -4,6 +4,8 @@ from lattice.evaluation.engine import (
     EvalResult,
     EvalTask,
     EvaluationEngine,
+    load_report,
+    save_report,
 )
 from lattice.evaluation.citation_utility import (
     CitationUtilityEvaluator,
@@ -18,4 +20,6 @@ __all__ = [
     "EvalResult",
     "EvalTask",
     "EvaluationEngine",
+    "load_report",
+    "save_report",
 ]

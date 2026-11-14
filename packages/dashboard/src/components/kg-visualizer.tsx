@@ -1,32 +1,26 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
-import { Search, ZoomIn, ZoomOut, Maximize2, X } from "lucide-react";
-import { getKnowledgeGraph, getEntityDetail, ingestText, EntityDetail, KGNode, KGEdge } from "@/lib/api";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import dynamic from "next/dynamic";
+import { Search, Maximize2, X, Box, Square, Sparkles } from "lucide-react";
+import {
+  getKnowledgeGraph, getEntityDetail, getCommunities, ingestText,
+  Communities, EntityDetail, KGNode, KGEdge,
+} from "@/lib/api";
+import { COMMUNITY_PALETTE, PROVENANCE_STYLES, communityColor, type GraphMode } from "./kg-style";
 
-const COMMUNITY_PALETTE = [
-  "#34d399", "#60a5fa", "#f87171", "#a78bfa", "#fbbf24",
-  "#f472b6", "#2dd4bf", "#fb923c", "#818cf8", "#4ade80",
-  "#e879f9", "#38bdf8", "#facc15", "#a3e635", "#f43f5e",
-];
+// three.js and the force engines need `window`, so the renderer is client-only.
+const KGForceGraph = dynamic(() => import("./kg-force-graph").then((m) => m.KGForceGraph), {
+  ssr: false,
+  loading: () => <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500">Loading renderer...</div>,
+});
 
-const PROVENANCE_STYLES: Record<string, { dash: number[]; opacity: number; label: string }> = {
-  extracted: { dash: [], opacity: 0.7, label: "Extracted" },
-  inferred: { dash: [6, 4], opacity: 0.5, label: "Inferred" },
-  ambiguous: { dash: [2, 3], opacity: 0.35, label: "Ambiguous" },
-};
-
-interface NodePosition {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  node: KGNode;
-}
+const MAX_COMMUNITY_CHIPS = 12;
 
 export function KnowledgeGraphView() {
   const [nodes, setNodes] = useState<KGNode[]>([]);
   const [edges, setEdges] = useState<KGEdge[]>([]);
+  const [insights, setInsights] = useState<Communities | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
@@ -37,13 +31,9 @@ export function KnowledgeGraphView() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [selected, setSelected] = useState<KGNode | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [zoom, setZoom] = useState(1);
-  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const positionsRef = useRef<NodePosition[]>([]);
-  const animRef = useRef<number>(0);
-  const isDragging = useRef(false);
-  const dragStart = useRef({ x: 0, y: 0 });
+  const [mode, setMode] = useState<GraphMode>("3d");
+  const [hiddenCommunities, setHiddenCommunities] = useState<Set<number>>(new Set());
+  const [fitSignal, setFitSignal] = useState(0);
 
   const loadGraph = useCallback(() => {
     return getKnowledgeGraph().then((data) => {
@@ -52,10 +42,12 @@ export function KnowledgeGraphView() {
       setTruncated(data.truncated);
       setDemo(false);
       setError(null);
+      getCommunities().then(setInsights).catch(() => setInsights(null));
     }).catch((err: unknown) => {
       const unreachable = err instanceof TypeError;
       setDemo(unreachable);
       setTruncated(false);
+      setInsights(null);
       const data = unreachable ? getDemoData() : { nodes: [], edges: [] };
       setNodes(data.nodes);
       setEdges(data.edges);
@@ -97,222 +89,42 @@ export function KnowledgeGraphView() {
     }
   };
 
-  useEffect(() => {
-    positionsRef.current = nodes.map((node) => ({
-      x: 400 + (Math.random() - 0.5) * 400,
-      y: 300 + (Math.random() - 0.5) * 300,
-      vx: 0, vy: 0, node,
-    }));
-  }, [nodes]);
-
-  const nodeColor = (node: KGNode): string => {
-    if (node.community != null) {
-      return COMMUNITY_PALETTE[node.community % COMMUNITY_PALETTE.length];
-    }
-    const fallback: Record<string, string> = {
-      component: "#34d399", service: "#60a5fa", failure_mode: "#f87171",
-      procedure: "#a78bfa", person: "#fbbf24", Function: "#38bdf8",
-      Class: "#f472b6", Module: "#2dd4bf",
-    };
-    return fallback[node.entity_type] || "#a1a1aa";
-  };
-
-  const draw = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const positions = positionsRef.current;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.save();
-    ctx.translate(panOffset.x, panOffset.y);
-    ctx.scale(zoom, zoom);
-
-    const searchLower = searchQuery.toLowerCase();
-    const matchIds = new Set(
-      searchLower
-        ? positions
-            .filter((p) => p.node.name.toLowerCase().includes(searchLower) || p.node.entity_type.toLowerCase().includes(searchLower))
-            .map((p) => p.node.id)
-        : []
-    );
-
-    for (const edge of edges) {
-      const s = positions.find((p) => p.node.id === edge.source);
-      const t = positions.find((p) => p.node.id === edge.target);
-      if (!s || !t) continue;
-
-      const prov = PROVENANCE_STYLES[edge.provenance || "extracted"] || PROVENANCE_STYLES.extracted;
-      const dimmed = searchLower && !matchIds.has(edge.source) && !matchIds.has(edge.target);
-
-      ctx.beginPath();
-      ctx.setLineDash(prov.dash);
-      ctx.strokeStyle = dimmed ? "rgba(63,63,70,0.15)" : `rgba(161,161,170,${prov.opacity})`;
-      ctx.lineWidth = 1.2;
-      ctx.moveTo(s.x, s.y);
-      ctx.lineTo(t.x, t.y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Arrow head
-      const angle = Math.atan2(t.y - s.y, t.x - s.x);
-      const arrowLen = 8;
-      const mx = (s.x + t.x) / 2;
-      const my = (s.y + t.y) / 2;
-      if (!dimmed) {
-        ctx.beginPath();
-        ctx.moveTo(mx, my);
-        ctx.lineTo(mx - arrowLen * Math.cos(angle - 0.4), my - arrowLen * Math.sin(angle - 0.4));
-        ctx.moveTo(mx, my);
-        ctx.lineTo(mx - arrowLen * Math.cos(angle + 0.4), my - arrowLen * Math.sin(angle + 0.4));
-        ctx.strokeStyle = `rgba(161,161,170,${prov.opacity})`;
-        ctx.stroke();
-      }
-
-      // Edge label
-      if (!dimmed) {
-        ctx.fillStyle = `rgba(161,161,170,${prov.opacity * 0.7})`;
-        ctx.font = "9px monospace";
-        ctx.textAlign = "center";
-        ctx.fillText(edge.relation_type, mx, my - 6);
-      }
-    }
-
-    for (const p of positions) {
-      const color = nodeColor(p.node);
-      const isSelected = selected?.id === p.node.id;
-      const isMatch = matchIds.has(p.node.id);
-      const dimmed = searchLower && !isMatch && !isSelected;
-      const radius = isSelected ? 12 : isMatch ? 10 : 7;
-
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = dimmed ? `${color}20` : isSelected || isMatch ? color : `${color}80`;
-      ctx.fill();
-      ctx.strokeStyle = dimmed ? `${color}30` : color;
-      ctx.lineWidth = isSelected ? 2.5 : 1;
-      ctx.stroke();
-
-      if (!dimmed) {
-        ctx.fillStyle = dimmed ? "rgba(228,228,231,0.2)" : "#e4e4e7";
-        ctx.font = isSelected ? "bold 12px sans-serif" : "11px sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(p.node.name, p.x, p.y + radius + 14);
-      }
-    }
-
-    ctx.restore();
-  }, [edges, zoom, panOffset, searchQuery, selected]);
-
-  useEffect(() => {
-    const simEdges = edges;
-    let ticks = 0;
-    const maxTicks = 250;
-
-    const tick = () => {
-      if (ticks >= maxTicks) return;
-      ticks++;
-
-      const positions = positionsRef.current;
-      const width = 800;
-      const height = 600;
-
-      for (let i = 0; i < positions.length; i++) {
-        for (let j = i + 1; j < positions.length; j++) {
-          const dx = positions[j].x - positions[i].x;
-          const dy = positions[j].y - positions[i].y;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          const force = 3000 / (dist * dist);
-          const fx = (dx / dist) * force;
-          const fy = (dy / dist) * force;
-          positions[i].vx -= fx;
-          positions[i].vy -= fy;
-          positions[j].vx += fx;
-          positions[j].vy += fy;
-        }
-      }
-
-      for (const edge of simEdges) {
-        const si = positions.findIndex((p) => p.node.id === edge.source);
-        const ti = positions.findIndex((p) => p.node.id === edge.target);
-        if (si === -1 || ti === -1) continue;
-        const dx = positions[ti].x - positions[si].x;
-        const dy = positions[ti].y - positions[si].y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const force = (dist - 120) * 0.01;
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        positions[si].vx += fx;
-        positions[si].vy += fy;
-        positions[ti].vx -= fx;
-        positions[ti].vy -= fy;
-      }
-
-      for (const p of positions) {
-        p.vx += (width / 2 - p.x) * 0.001;
-        p.vy += (height / 2 - p.y) * 0.001;
-        p.vx *= 0.85;
-        p.vy *= 0.85;
-        p.x += p.vx;
-        p.y += p.vy;
-        p.x = Math.max(40, Math.min(width - 40, p.x));
-        p.y = Math.max(40, Math.min(height - 40, p.y));
-      }
-
-      draw();
-      animRef.current = requestAnimationFrame(tick);
-    };
-
-    cancelAnimationFrame(animRef.current);
-    tick();
-    return () => cancelAnimationFrame(animRef.current);
-  }, [draw, edges, nodes]);
-
-
-
-  const selectNode = (node: KGNode | null) => {
+  const selectNode = useCallback((node: KGNode | null) => {
     setSelected(node);
     setDetail(null);
     setDetailError(null);
+  }, []);
+
+  const selectById = (id: string) => {
+    const node = nodes.find((n) => n.id === id);
+    if (node) selectNode(node);
   };
 
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (isDragging.current) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left - panOffset.x) / zoom;
-    const y = (e.clientY - rect.top - panOffset.y) / zoom;
-
-    const clicked = positionsRef.current.find((p) => {
-      const dx = p.x - x;
-      const dy = p.y - y;
-      return dx * dx + dy * dy < 200;
+  const toggleCommunity = (c: number) => {
+    setHiddenCommunities((prev) => {
+      const next = new Set(prev);
+      if (next.has(c)) next.delete(c); else next.add(c);
+      return next;
     });
-
-    selectNode(clicked?.node ?? null);
   };
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
-    isDragging.current = false;
-    dragStart.current = { x: e.clientX - panOffset.x, y: e.clientY - panOffset.y };
-  };
+  const matchIds = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return new Set<string>();
+    return new Set(nodes
+      .filter((n) => n.name.toLowerCase().includes(q) || n.entity_type.toLowerCase().includes(q))
+      .map((n) => n.id));
+  }, [nodes, searchQuery]);
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (e.buttons !== 1) return;
-    isDragging.current = true;
-    setPanOffset({ x: e.clientX - dragStart.current.x, y: e.clientY - dragStart.current.y });
-  };
+  const godNodeIds = useMemo(() => new Set(insights?.god_nodes.map((g) => g.id) ?? []), [insights]);
 
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    setZoom((z) => Math.max(0.2, Math.min(4, z - e.deltaY * 0.001)));
-  };
-
-  const communitySet = new Set(nodes.map((n) => n.community).filter((c): c is number => c != null));
-  const communities = Array.from(communitySet).sort((a, b) => a - b);
+  const communities = useMemo(() => {
+    const sizes = new Map<number, number>();
+    for (const n of nodes) {
+      if (n.community != null) sizes.set(n.community, (sizes.get(n.community) ?? 0) + 1);
+    }
+    return Array.from(sizes.entries()).sort((a, b) => b[1] - a[1]);
+  }, [nodes]);
 
   const neighborIds = selected
     ? new Set(
@@ -362,13 +174,17 @@ export function KnowledgeGraphView() {
               </button>
             )}
           </div>
-          <button onClick={() => { setZoom((z) => Math.min(z + 0.2, 4)); }} className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
-            <ZoomIn className="w-4 h-4" />
-          </button>
-          <button onClick={() => { setZoom((z) => Math.max(z - 0.2, 0.2)); }} className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
-            <ZoomOut className="w-4 h-4" />
-          </button>
-          <button onClick={() => { setZoom(1); setPanOffset({ x: 0, y: 0 }); }} className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
+          <div className="flex bg-zinc-800 rounded-lg p-0.5" role="group" aria-label="Render mode">
+            {(["3d", "2d"] as const).map((m) => (
+              <button key={m} onClick={() => setMode(m)} aria-pressed={mode === m}
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs ${mode === m ? "bg-zinc-700 text-emerald-400" : "text-zinc-400 hover:text-zinc-200"}`}>
+                {m === "3d" ? <Box className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
+                {m.toUpperCase()}
+              </button>
+            ))}
+          </div>
+          <button onClick={() => setFitSignal((s) => s + 1)} title="Fit graph to view"
+            className="p-2 bg-zinc-800 rounded-lg hover:bg-zinc-700">
             <Maximize2 className="w-4 h-4" />
           </button>
         </div>
@@ -392,25 +208,32 @@ export function KnowledgeGraphView() {
         </div>
       )}
 
-      {/* Legends */}
-      <div className="flex gap-6 mb-3 flex-wrap">
+      <div className="flex gap-6 mb-3 flex-wrap items-center">
         {communities.length > 0 && (
-          <div className="flex items-center gap-3 text-xs text-zinc-400">
-            <span className="font-medium text-zinc-300">Communities:</span>
-            {communities.slice(0, 8).map((c) => (
-              <span key={c} className="flex items-center gap-1">
-                <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: COMMUNITY_PALETTE[c % COMMUNITY_PALETTE.length] }} />
-                {c}
-              </span>
-            ))}
-            {communities.length > 8 && <span>+{communities.length - 8}</span>}
+          <div className="flex items-center gap-1.5 text-xs text-zinc-400 flex-wrap">
+            <span className="font-medium text-zinc-300 mr-1">Communities:</span>
+            {communities.slice(0, MAX_COMMUNITY_CHIPS).map(([c, size]) => {
+              const hidden = hiddenCommunities.has(c);
+              return (
+                <button key={c} onClick={() => toggleCommunity(c)} aria-pressed={!hidden}
+                  title={hidden ? "Show community" : "Hide community"}
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded ${hidden ? "opacity-35 line-through" : "hover:bg-zinc-800"}`}>
+                  <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ backgroundColor: COMMUNITY_PALETTE[c % COMMUNITY_PALETTE.length] }} />
+                  {c}<span className="text-zinc-600">({size})</span>
+                </button>
+              );
+            })}
+            {communities.length > MAX_COMMUNITY_CHIPS && <span>+{communities.length - MAX_COMMUNITY_CHIPS}</span>}
+            {hiddenCommunities.size > 0 && (
+              <button onClick={() => setHiddenCommunities(new Set())} className="ml-1 text-emerald-400 hover:underline">show all</button>
+            )}
           </div>
         )}
         <div className="flex items-center gap-3 text-xs text-zinc-400">
-          <span className="font-medium text-zinc-300">Edge style:</span>
+          <span className="font-medium text-zinc-300">Edges:</span>
           {Object.entries(PROVENANCE_STYLES).map(([key, val]) => (
             <span key={key} className="flex items-center gap-1">
-              <svg width="20" height="8"><line x1="0" y1="4" x2="20" y2="4" stroke="#a1a1aa" strokeWidth="1.5" strokeDasharray={val.dash.join(",")} opacity={val.opacity} /></svg>
+              <svg width="20" height="8"><line x1="0" y1="4" x2="20" y2="4" stroke="#a1a1aa" strokeWidth="1.5" strokeDasharray={val.dash?.join(",") ?? ""} opacity={val.opacity + 0.3} /></svg>
               {val.label}
             </span>
           ))}
@@ -418,22 +241,26 @@ export function KnowledgeGraphView() {
       </div>
 
       <div className="flex-1 flex gap-4 min-h-0">
-        <div
-          className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden"
-          onWheel={handleWheel}
-        >
-          <canvas
-            ref={canvasRef}
-            width={800}
-            height={600}
-            className="w-full h-full cursor-grab active:cursor-grabbing"
-            onClick={handleCanvasClick}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-          />
+        <div className="relative flex-1 bg-[#0c0c0e] border border-zinc-800 rounded-xl overflow-hidden">
+          {nodes.length > 0 && (
+            <KGForceGraph
+              mode={mode}
+              nodes={nodes}
+              edges={edges}
+              selectedId={selected?.id ?? null}
+              matchIds={matchIds}
+              godNodeIds={godNodeIds}
+              hiddenCommunities={hiddenCommunities}
+              fitSignal={fitSignal}
+              onSelect={selectNode}
+            />
+          )}
+          <p className="absolute bottom-2 left-3 text-[11px] text-zinc-600 pointer-events-none">
+            {mode === "3d" ? "Drag to rotate · right-drag to pan · scroll to zoom" : "Drag to pan · scroll to zoom"} · click a node to focus
+          </p>
         </div>
 
-        {selected && (
+        {selected ? (
           <div className="w-72 bg-zinc-900 border border-zinc-800 rounded-xl p-4 overflow-y-auto">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm truncate">{panelEntity?.name}</h3>
@@ -441,17 +268,18 @@ export function KnowledgeGraphView() {
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="flex gap-1.5 mt-2">
+            <div className="flex gap-1.5 mt-2 flex-wrap">
               <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">
                 {selected.entity_type}
               </span>
               {selected.community != null && (
-                <span
-                  className="text-xs px-2 py-0.5 rounded-full text-white"
-                  style={{ backgroundColor: COMMUNITY_PALETTE[selected.community % COMMUNITY_PALETTE.length] + "cc" }}
-                >
+                <span className="text-xs px-2 py-0.5 rounded-full text-white"
+                  style={{ backgroundColor: communityColor(selected) + "cc" }}>
                   community {selected.community}
                 </span>
+              )}
+              {godNodeIds.has(selected.id) && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-amber-900/50 text-amber-300">hub</span>
               )}
             </div>
             {panelEntity?.description && (
@@ -463,20 +291,20 @@ export function KnowledgeGraphView() {
               <p className="text-xs font-medium text-zinc-300 mb-2">
                 Connections ({selectedEdges.length})
               </p>
-              {selectedEdges.map((e, i) => {
+              {selectedEdges.map((e) => {
                 const otherId = e.source === selected.id ? e.target : e.source;
                 const otherNode = neighborNodes.find((n) => n.id === otherId) ?? nodes.find((n) => n.id === otherId);
                 const direction = e.source === selected.id ? "→" : "←";
                 const prov = e.provenance || "extracted";
                 return (
                   <div
-                    key={i}
+                    key={e.id}
                     className="text-xs text-zinc-400 py-1 flex items-center gap-1 cursor-pointer hover:text-zinc-200"
                     onClick={() => otherNode && selectNode(otherNode)}
                   >
                     <span>{direction}</span>
-                    <span className="font-medium text-zinc-300">{otherNode?.name || otherId}</span>
-                    <span className="text-zinc-600">({e.relation_type})</span>
+                    <span className="font-medium text-zinc-300 truncate">{otherNode?.name || otherId}</span>
+                    <span className="text-zinc-600 shrink-0">({e.relation_type})</span>
                     {prov !== "extracted" && (
                       <span className="text-zinc-600 italic">[{prov}]</span>
                     )}
@@ -484,25 +312,41 @@ export function KnowledgeGraphView() {
                 );
               })}
             </div>
-
-            {neighborNodes.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-zinc-800">
-                <p className="text-xs font-medium text-zinc-300 mb-2">Neighbors</p>
+          </div>
+        ) : insights && (insights.god_nodes.length > 0 || insights.surprising_connections.length > 0) ? (
+          <div className="w-72 bg-zinc-900 border border-zinc-800 rounded-xl p-4 overflow-y-auto text-xs">
+            <p className="flex items-center gap-1.5 font-medium text-zinc-300">
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" /> Graph insights
+            </p>
+            {insights.god_nodes.length > 0 && (
+              <div className="mt-3">
+                <p className="text-zinc-500 mb-1.5">Hub entities</p>
                 <div className="flex flex-wrap gap-1">
-                  {neighborNodes.map((n) => (
-                    <button
-                      key={n.id}
-                      onClick={() => selectNode(n)}
-                      className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200 truncate max-w-[120px]"
-                    >
-                      {n.name}
+                  {insights.god_nodes.map((g) => (
+                    <button key={g.id} onClick={() => selectById(g.id)}
+                      className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 truncate max-w-[200px]">
+                      {g.name}
                     </button>
                   ))}
                 </div>
               </div>
             )}
+            {insights.surprising_connections.length > 0 && (
+              <div className="mt-4">
+                <p className="text-zinc-500 mb-1.5">Surprising connections</p>
+                <ul className="space-y-1.5">
+                  {insights.surprising_connections.map((s, i) => (
+                    <li key={i}>
+                      <button onClick={() => selectById(s.source)} className="text-left text-zinc-400 hover:text-zinc-200">
+                        {s.explanation}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );

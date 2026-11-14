@@ -243,6 +243,10 @@ Rules:
                     for st in state.plan.subtasks:
                         if st.id == state.current_subtask_id:
                             st.status = TaskStatus.COMPLETED
+                elif not latest_review.approved:
+                    # Revisions loop writer -> reviewer without passing prepare_next,
+                    # so they must count toward max_iterations here.
+                    state.iteration_count += 1
             return state.model_dump()
 
         def finalize(state_dict: dict) -> dict:

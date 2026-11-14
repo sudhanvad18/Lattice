@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from lattice_api.audit import AuditTrail
 from lattice_api.graph_routes import get_knowledge_base as get_knowledge_base
 from lattice_api.graph_routes import router
+from lattice_api.eval_routes import router as eval_router
 from lattice_api.models import (
     ArtifactResponse,
     HealthResponse,
@@ -100,6 +101,7 @@ def create_app(
 
     app.state.knowledge_base = knowledge_base
     app.include_router(router)
+    app.include_router(eval_router)
 
     if task_manager:
         _task_manager = task_manager
