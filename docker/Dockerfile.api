@@ -12,7 +12,7 @@ COPY packages/api/ /app/packages/api/
 RUN pip install --no-cache-dir \
     fastapi uvicorn[standard] pydantic pydantic-settings \
     langfuse opentelemetry-api opentelemetry-sdk prometheus-client \
-    structlog chromadb redis httpx langgraph langchain-core \
+    structlog chromadb redis httpx langgraph langchain-core neo4j \
     -e /app/packages/core
 
 COPY packages/api/ /app/packages/api/
