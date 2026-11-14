@@ -14,7 +14,11 @@ Design principles:
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Optional
 
 import networkx as nx
@@ -89,6 +93,51 @@ class NetworkXBackend(KnowledgeGraphBackend):
     def __init__(self) -> None:
         self._graph = nx.MultiDiGraph()
         self._entities: dict[str, Entity] = {}
+
+    def save(self, path: Path) -> None:
+        """Atomically persist a versioned graph snapshot."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot = {
+            "version": 1,
+            "entities": [e.model_dump(mode="json") for e in self.get_all_entities()],
+            "relations": [r.model_dump(mode="json") for r in self.get_all_relations()],
+        }
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent, delete=False,
+            ) as stream:
+                temporary = stream.name
+                json.dump(snapshot, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None and os.path.exists(temporary):
+                os.unlink(temporary)
+
+    @classmethod
+    def load(cls, path: Path) -> NetworkXBackend:
+        """Restore entities and edges, rejecting invalid snapshots."""
+        snapshot = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(snapshot, dict) or snapshot.get("version") != 1:
+            raise ValueError("Unsupported graph snapshot version")
+        entities = [Entity.model_validate(e) for e in snapshot["entities"]]
+        relations = [Relation.model_validate(r) for r in snapshot["relations"]]
+        backend = cls()
+        for entity in entities:
+            backend.add_entity(entity)
+            if entity.community is not None:
+                backend.set_entity_community(entity.id, entity.community)
+        for relation in relations:
+            if (
+                relation.source_id not in backend._entities
+                or relation.target_id not in backend._entities
+            ):
+                raise ValueError("Graph snapshot contains a dangling relation")
+            backend.add_relation(relation)
+        return backend
 
     @property
     def num_entities(self) -> int:
