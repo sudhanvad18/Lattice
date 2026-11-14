@@ -78,7 +78,7 @@ $(cat "$AI/task-$task.md")"
     echo "== $task: codex exited $code at $(date '+%F %T')"
     [[ -f "$wt/.ai/handoff-$task.md" ]] && cp "$wt/.ai/handoff-$task.md" "$AI/handoff-$task.md"
     [[ -L "$wt/packages/dashboard/node_modules" ]] && rm "$wt/packages/dashboard/node_modules"
-    git -C "$wt" add -A -- . ':!.ai'
+    git -C "$wt" add -A
     if git -C "$wt" diff --cached --quiet; then
       echo "no changes to commit"
     else
