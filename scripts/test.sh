@@ -27,8 +27,10 @@ if [[ "${1:-}" == "--lint" ]]; then
     files=("$@")
   else
     files=()
+    # Existing files carry lint debt, so default to files new since HEAD.
     while IFS= read -r f; do files+=("$f"); done < <(
-      { git diff --name-only HEAD; git ls-files --others --exclude-standard; } | grep '\.py$' | sort -u
+      { git diff --name-only --diff-filter=A HEAD; git ls-files --others --exclude-standard; } \
+        | grep '\.py$' | sort -u
     )
   fi
   existing=()

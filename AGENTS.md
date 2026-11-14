@@ -19,7 +19,9 @@ scripts/test.sh                      # full suite
 scripts/test.sh tests/graph -q       # any pytest args
 ```
 
-Lint: `scripts/test.sh --lint` (ruff on the files you changed).
+Lint: `scripts/test.sh --lint` runs ruff on files that are new since HEAD; they must be clean.
+Existing files carry pre-existing lint debt: don't add new errors to the lines you write, and don't
+reformat or "fix" untouched code (it causes merge conflicts between parallel workers).
 
 ## Conventions
 
@@ -35,6 +37,6 @@ These apply when you are running as a worker inside `.worktrees/<task>` on an `a
 
 - **Scope Isolation:** Only modify files explicitly listed in your assigned task spec. Never edit shared config files (`pyproject.toml`, `docker-compose.yml`, `.gitignore`, `AGENTS.md`, `packages/dashboard/package.json`) unless the spec instructs you to.
 - **Contracts are fixed:** If the spec references a shared interface or contract file, implement against it exactly. If it seems wrong, note it in the handoff instead of changing it.
-- **Verification:** Before finishing, run `scripts/test.sh` and `scripts/test.sh --lint`. Fix all failures you introduced before exiting.
+- **Verification:** Before finishing, run `scripts/test.sh` (full suite) and `scripts/test.sh --lint`. Fix every failure you introduced before exiting.
 - **No git operations:** Do not commit, branch, rebase, or push. The orchestrator commits your work after you exit.
 - **Handoff Report:** When complete, write `.ai/handoff-<task-name>.md` (inside your working directory) containing: files changed, what was implemented, test results (pass/fail counts), edge cases, and anything left undone or deviating from the spec.

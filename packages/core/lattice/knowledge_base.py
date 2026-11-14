@@ -24,7 +24,8 @@ from pathlib import Path
 import structlog
 
 from lattice.graph.builder import KnowledgeGraphBuilder
-from lattice.graph.engine import NetworkXBackend
+from lattice.graph.engine import KnowledgeGraphBackend
+from lattice.graph.factory import create_graph_backend
 from lattice.graph.models import Entity, KGQueryResult, KGStats
 from lattice.ingestion.cache import IngestionCache
 from lattice.ingestion.chunker import ChunkConfig
@@ -47,6 +48,7 @@ class KnowledgeBase:
         persist_dir: str | Path = "data",
         chunk_config: ChunkConfig | None = None,
         enable_cache: bool = True,
+        graph_backend: KnowledgeGraphBackend | None = None,
     ) -> None:
         persist_path = Path(persist_dir)
 
@@ -56,13 +58,16 @@ class KnowledgeBase:
             persist_dir=persist_path / "chroma",
             collection_name="lattice_chunks",
         )
-        self._kg_builder = KnowledgeGraphBuilder(backend=NetworkXBackend())
+        self._kg_builder = KnowledgeGraphBuilder(backend=graph_backend or create_graph_backend())
         self._chunks: list[Chunk] = []
 
     @property
-    def graph(self) -> NetworkXBackend:
+    def graph(self) -> KnowledgeGraphBackend:
         """Direct access to the graph backend for queries."""
-        return self._kg_builder.backend  # type: ignore[return-value]
+        return self._kg_builder.backend
+
+    def close(self) -> None:
+        self.graph.close()
 
     @property
     def vector_store(self) -> VectorStore:

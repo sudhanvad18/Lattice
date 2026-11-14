@@ -75,6 +75,9 @@ class KnowledgeGraphBackend(ABC):
     @abstractmethod
     def get_subgraph(self, center_id: str, depth: int = 2) -> KGQueryResult: ...
 
+    def close(self) -> None:
+        """Release connections or flush state. No-op for in-memory backends."""
+
 
 class NetworkXBackend(KnowledgeGraphBackend):
     """In-memory knowledge graph using NetworkX.

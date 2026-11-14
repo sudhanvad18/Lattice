@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: Optional[str] = None
+    neo4j_database: Optional[str] = None
 
     # --- Vector Store ---
     chroma_persist_dir: Path = Path("data/chroma")
