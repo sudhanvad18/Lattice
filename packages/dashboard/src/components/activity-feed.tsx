@@ -55,7 +55,7 @@ export function ActivityFeed() {
                 <div className="flex items-center gap-2">
                   <AgentTag agent={event.agent} />
                   <span className="text-xs text-zinc-500 font-mono">
-                    {event.task_id.slice(0, 8)}
+                    {(event.task_id || "—").slice(0, 8)}
                   </span>
                 </div>
                 <p className="text-sm text-zinc-300 mt-0.5 truncate">

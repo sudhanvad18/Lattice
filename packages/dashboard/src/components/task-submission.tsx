@@ -12,7 +12,7 @@ export function TaskSubmission() {
   const [currentTask, setCurrentTask] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const { events, status } = useTaskStream(currentTask?.id ?? null);
+  const { events, status } = useTaskStream(currentTask?.task_id ?? null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -90,11 +90,12 @@ export function TaskSubmission() {
       {currentTask && (
         <div className="flex-1 overflow-hidden flex flex-col">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-medium text-zinc-300">Task Progress</h2>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">
-                {currentTask.id.slice(0, 8)}
+            <div className="flex items-center gap-2 min-w-0">
+              <h2 className="text-sm font-medium text-zinc-300 shrink-0">Task Progress</h2>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400 shrink-0">
+                {currentTask.task_id.slice(0, 8)}
               </span>
+              <span className="text-xs text-zinc-500 truncate">{currentTask.original_task}</span>
             </div>
             <StatusBadge status={status} />
           </div>
@@ -133,6 +134,13 @@ function StatusBadge({ status }: { status: string }) {
     return (
       <span className="flex items-center gap-1 text-xs text-emerald-400">
         <CheckCircle2 className="w-3 h-3" /> Complete
+      </span>
+    );
+  }
+  if (status === "error") {
+    return (
+      <span className="flex items-center gap-1 text-xs text-red-400">
+        <AlertCircle className="w-3 h-3" /> Failed
       </span>
     );
   }

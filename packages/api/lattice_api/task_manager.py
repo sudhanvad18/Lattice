@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -33,7 +33,9 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-EventCallback = Callable[[str, str, dict[str, Any]], None]
+# One record per emitted task event. WebSocket handlers receive this dict.
+EventCallback = Callable[[dict[str, Any]], None]
+_EVENT_LOG_LIMIT = 200
 
 
 class TaskManager:
@@ -55,6 +57,7 @@ class TaskManager:
         self._tasks: dict[str, AgentState] = {}
         self._running: dict[str, asyncio.Task] = {}
         self._event_callbacks: list[EventCallback] = []
+        self._event_log: list[dict[str, Any]] = []
 
     @property
     def audit_trail(self) -> AuditTrail:
@@ -64,12 +67,32 @@ class TaskManager:
         """Register a callback for task events (used by WebSocket)."""
         self._event_callbacks.append(callback)
 
+    def off_event(self, callback: EventCallback) -> None:
+        """Remove a previously registered event callback."""
+        try:
+            self._event_callbacks.remove(callback)
+        except ValueError:
+            return
+
+    def recent_events(self) -> list[dict[str, Any]]:
+        """Events emitted so far, oldest first. Safe to iterate while new events arrive."""
+        return list(self._event_log)
+
     def _emit_event(self, task_id: str, event: str, data: dict[str, Any]) -> None:
-        for cb in self._event_callbacks:
+        record = {
+            "event": event,
+            "task_id": task_id,
+            "data": data,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        self._event_log.append(record)
+        if len(self._event_log) > _EVENT_LOG_LIMIT:
+            del self._event_log[: len(self._event_log) - _EVENT_LOG_LIMIT]
+        for cb in list(self._event_callbacks):
             try:
-                cb(task_id, event, data)
+                cb(record)
             except Exception:
-                pass
+                logger.exception("task_event_callback_failed", task_id=task_id, event=event)
 
     async def submit_task(
         self,
@@ -133,7 +156,9 @@ class TaskManager:
                 max_iterations=state.max_iterations,
                 checkpoint_store=self._checkpoint_store,
             )
-
+            # The orchestrator builds a fresh AgentState, which would mint a new
+            # task_id. The id returned by POST /tasks is the one clients poll.
+            result.task_id = task_id
             self._tasks[task_id] = result
 
             self._audit.record(

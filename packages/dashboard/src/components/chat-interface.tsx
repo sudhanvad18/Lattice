@@ -56,7 +56,7 @@ export function ChatInterface() {
       <div className="mb-4">
         <h1 className="text-2xl font-bold">Research Chat</h1>
         <p className="text-zinc-400 text-sm mt-1">
-          Ask questions — powered by the Researcher agent with RAG over your knowledge base
+          Ask questions answered from retrieved passages and knowledge-graph entities
         </p>
       </div>
 

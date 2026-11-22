@@ -9,7 +9,9 @@ Endpoints:
 - GET  /tasks/{id}     Get task status
 - GET  /tasks/{id}/result   Get full task result with artifacts
 - GET  /tasks/{id}/audit    Get audit trail
-- WS   /ws/{task_id}  Stream real-time task progress
+- POST /chat           Answer a question from the knowledge base
+- WS   /ws/activity    Stream task events across every task
+- WS   /ws/{task_id}   Stream real-time progress for one task
 - GET  /health         Health check
 - GET  /kg/graph, /kg/stats, /kg/entities, /kg/entities/{entity_id}
 - GET  /kg/communities  Community detection
@@ -20,19 +22,24 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from lattice_api.audit import AuditTrail
+from lattice_api.chat import build_chat_answer
+from lattice_api.eval_routes import router as eval_router
+from lattice_api.graph_routes import KnowledgeBaseDependency
 from lattice_api.graph_routes import get_knowledge_base as get_knowledge_base
 from lattice_api.graph_routes import router
-from lattice_api.eval_routes import router as eval_router
 from lattice_api.models import (
     ArtifactResponse,
+    ChatRequest,
+    ChatResponse,
     HealthResponse,
     TaskResultResponse,
     TaskStatusResponse,
@@ -55,6 +62,66 @@ def get_task_manager() -> TaskManager:
     if _task_manager is None:
         raise RuntimeError("TaskManager not initialized")
     return _task_manager
+
+
+_TERMINAL_EVENTS = frozenset({"task_complete", "error"})
+
+
+def _record_key(record: dict[str, Any]) -> tuple[Any, ...]:
+    return (record.get("task_id"), record.get("event"), record.get("timestamp"))
+
+
+async def _stream_task_events(websocket: WebSocket, task_id: str | None) -> None:
+    """Replay logged task events, then stream new ones.
+
+    `task_id` None broadcasts every task (the activity feed). A specific id
+    closes after that task completes or fails, matching the per-task socket.
+    """
+    await websocket.accept()
+    tm = get_task_manager()
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    def matches(record: dict[str, Any]) -> bool:
+        return task_id is None or record.get("task_id") == task_id
+
+    def handler(record: dict[str, Any]) -> None:
+        if matches(record):
+            queue.put_nowait(record)
+
+    tm.on_event(handler)
+    try:
+        seen: set[tuple[Any, ...]] = set()
+        for record in tm.recent_events():
+            if not matches(record):
+                continue
+            seen.add(_record_key(record))
+            await websocket.send_json(record)
+            if task_id is not None and record.get("event") in _TERMINAL_EVENTS:
+                await websocket.close()
+                return
+        while True:
+            try:
+                record = await asyncio.wait_for(queue.get(), timeout=30.0)
+            except TimeoutError:
+                await websocket.send_json({
+                    "event": "ping",
+                    "task_id": task_id or "",
+                    "data": {},
+                    "timestamp": datetime.now(UTC).isoformat(),
+                })
+                continue
+            key = _record_key(record)
+            if key in seen:
+                continue
+            seen.add(key)
+            await websocket.send_json(record)
+            if task_id is not None and record.get("event") in _TERMINAL_EVENTS:
+                await websocket.close()
+                return
+    except WebSocketDisconnect:
+        pass
+    finally:
+        tm.off_event(handler)
 
 
 # --- App Creation ---
@@ -265,34 +332,33 @@ def create_app(
             return {"task_id": task_id, "events": _audit_trail.to_dicts(task_id)}
         return {"task_id": task_id, "events": []}
 
+    # --- Chat ---
+
+    @app.post("/chat", response_model=ChatResponse)
+    async def chat(request: ChatRequest, kb: KnowledgeBaseDependency):
+        """Answer from retrieved passages and graph entities. Does not call an LLM."""
+        try:
+            response, citations = await run_in_threadpool(
+                build_chat_answer, kb, request.message
+            )
+        except Exception as exc:
+            logger.error("chat_retrieval_failed", error=str(exc))
+            raise HTTPException(status_code=503, detail="Knowledge base retrieval failed") from exc
+        return ChatResponse(response=response, citations=citations)
+
     # --- WebSocket ---
+    # Register /ws/activity before /ws/{task_id}. Otherwise "activity" is captured
+    # as a task id and the feed never sees real tasks.
+
+    @app.websocket("/ws/activity")
+    async def websocket_activity(websocket: WebSocket):
+        """Stream events for every task, including events emitted before connect."""
+        await _stream_task_events(websocket, None)
 
     @app.websocket("/ws/{task_id}")
     async def websocket_task_stream(websocket: WebSocket, task_id: str):
-        """Stream real-time task progress via WebSocket."""
-        await websocket.accept()
-        queue: asyncio.Queue = asyncio.Queue()
-
-        def event_handler(tid: str, event: str, data: dict):
-            if tid == task_id:
-                queue.put_nowait({"event": event, "data": data})
-
-        tm = get_task_manager()
-        tm.on_event(event_handler)
-
-        try:
-            while True:
-                try:
-                    msg = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    await websocket.send_json(msg)
-                    if msg["event"] in ("task_complete", "error"):
-                        break
-                except asyncio.TimeoutError:
-                    await websocket.send_json({"event": "ping", "data": {}})
-        except WebSocketDisconnect:
-            pass
-        finally:
-            tm._event_callbacks.remove(event_handler)
+        """Stream real-time progress for one task."""
+        await _stream_task_events(websocket, task_id)
 
     return app
 
