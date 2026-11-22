@@ -1,0 +1,14 @@
+LATTICE / OFFLINE WORKFLOW
+Provider: MockProvider (scripted responses)
+Network/model requests: none
+Flow: plan -> research -> write -> reject -> revise -> approve
+Status: completed
+Artifacts: 3 (1 research, 2 document versions)
+Reviews: rejected -> approved
+Provider calls: 6
+
+Final artifact:
+
+# Demo service
+
+A small service with GET /health for readiness and POST /jobs for job submission.
