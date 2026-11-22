@@ -74,7 +74,7 @@ Use the returned `task_id` with:
 | `GET /tasks/{task_id}/audit` | Recorded audit events. |
 | `WS /ws/{task_id}` | Task event stream. |
 
-The default API task path constructs agents without an attached knowledge base. Use the Python demo for a workflow with explicit graph/vector context. Current API authentication is a placeholder; the local development service is not a production deployment recipe.
+API tasks use the knowledge base in `LATTICE_DATA_DIR` (default `data/`); populate it with `lattice ingest <dir>` first, or use the Python demo for a self-contained graph/vector context. Current API authentication is a placeholder; the local development service is not a production deployment recipe.
 
 ## Configuration
 
@@ -110,7 +110,7 @@ The dashboard is a UI prototype. These contracts need alignment before presentin
 - Task submission sends `goal`, while the API requires `task`.
 - The dashboard expects `id`/`goal`; the API returns `task_id`/`original_task`.
 - Dashboard WebSocket paths differ from the API's `WS /ws/{task_id}` route.
-- Dashboard graph, chat, and evaluation requests target endpoints absent from the current FastAPI app.
+- The dashboard chat request targets `POST /chat`, which the API does not provide. Graph (`/kg/*`) and evaluation (`/eval/results`) endpoints exist.
 - Write-back handlers and approval gates exist as library components; the API task manager does not execute them automatically.
 - Container/deployment files require integration work. In particular, API/MCP Dockerfiles reference a package-local installation path while the package manifest is at the repository root.
 

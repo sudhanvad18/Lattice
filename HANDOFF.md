@@ -29,8 +29,10 @@ agent team over it. Core pieces, all under `packages/`:
   evaluations.
 - `mcp`: MCP server exposing Lattice tools.
 
-Quick start: `lattice ingest examples/aerospace && lattice serve`, then `npm run dev` in
-`packages/dashboard`. Tests: `scripts/test.sh` (360 passed, 1 skipped as of this note; the
+Quick start: `python examples/mock_workflow.py` runs the real orchestrator with scripted model
+responses (no model, no network). For the knowledge base: `lattice ingest examples/aerospace &&
+lattice serve`, then `npm run dev` in `packages/dashboard`. Owner-facing docs: `README.md`,
+`docs/development.md`, `docs/demo.md`. Tests: `scripts/test.sh` (360 passed, 1 skipped as of this note; the
 skipped test needs a live Neo4j via `LATTICE_TEST_NEO4J_URI/USER/PASSWORD`).
 
 ## State of the repo
@@ -76,6 +78,10 @@ Rules that keep agents from colliding:
 
 Bugs and gaps:
 
+0. Dashboard task contract does not match the API, so Submit Task and History are broken end to
+   end: the dashboard posts `{goal}` but `POST /tasks` requires `task`, and it reads `id`/`goal`
+   where the API returns `task_id`/`original_task`. Fix on the dashboard side (`lib/api.ts`
+   types plus `task-submission.tsx`, `task-history.tsx`) so the API stays stable.
 1. `POST /chat` is called by the dashboard Chat tab but does not exist in the API.
 2. The activity feed opens `/ws/activity`; the API only serves `/ws/{task_id}`, so "activity" is
    treated as a task id.
@@ -92,8 +98,13 @@ Bugs and gaps:
 
 Product polish:
 
-8. README is stale: claims 219 tests and 86% coverage, documents a non-existent
-   `lattice init --template`. Rewrite around the CLI quick start and the dashboard.
+8. README (rewritten 2026-11-12, deliberately conservative about claims) predates the `lattice`
+   CLI, the `/kg/*` and `/eval/results` endpoints, and the 3D graph view. Add a CLI quick start
+   (`lattice ingest examples/aerospace`, `lattice serve`, `lattice eval`) in the same careful
+   tone; keep `examples/mock_workflow.py` as the zero-dependency entry point. Also:
+   `prometheus-client` is used but not declared in `pyproject.toml`, and the API/MCP
+   Dockerfiles install from package-local paths although the manifest is at the repo root
+   (see `docs/development.md` "Integration status").
 9. No CI. Add a GitHub Actions workflow running `scripts/test.sh`, `--lint`, and the dashboard
    `tsc --noEmit`.
 10. Lint debt: about 150 pre-existing ruff errors and two ESLint errors (`task-history.tsx`,
