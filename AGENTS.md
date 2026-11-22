@@ -10,6 +10,9 @@ guardrails, and write-back. Monorepo layout:
 - `tests/` — pytest suite, mirrors the package layout
 - `deploy/`, `docker/`, `docker-compose.yml` — infrastructure
 
+Current project state, open work, and which agent (Cursor, Codex, Claude Code, Grok) owns what
+live in `HANDOFF.md`. Read it before starting anything that is not a dispatched task.
+
 ## Running tests
 
 Always use the wrapper; it works from the main checkout and from any `.worktrees/*` checkout:
@@ -33,7 +36,8 @@ reformat or "fix" untouched code (it causes merge conflicts between parallel wor
 
 # Multi-Agent Orchestration Rules
 
-These apply when you are running as a worker inside `.worktrees/<task>` on an `agent/<task>` branch.
+These apply when you are running as a worker (Codex or Claude Code) inside `.worktrees/<task>` on
+an `agent/<task>` branch, and to cloud agents working on a `grok/<task>` branch.
 
 - **Scope Isolation:** Only modify files explicitly listed in your assigned task spec. Never edit shared config files (`pyproject.toml`, `docker-compose.yml`, `.gitignore`, `AGENTS.md`, `packages/dashboard/package.json`) unless the spec instructs you to.
 - **Contracts are fixed:** If the spec references a shared interface or contract file, implement against it exactly. If it seems wrong, note it in the handoff instead of changing it.

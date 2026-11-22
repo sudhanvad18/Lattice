@@ -1,9 +1,12 @@
 ---
-description: Multi-agent orchestration playbook. Use when the user says "Orchestrate <feature>" or asks to split work across Codex workers / git worktrees.
+description: Multi-agent orchestration playbook. Use when the user says "Orchestrate <feature>" or asks to split work across Codex / Claude Code workers or git worktrees.
 alwaysApply: false
 ---
 
-# Orchestrate: Cursor as manager, Codex CLI as parallel workers
+# Orchestrate: Cursor as manager, Codex and Claude Code CLIs as parallel workers
+
+Check `HANDOFF.md` "In flight" and open `grok/*` PRs first so local workers don't collide with
+cloud agents Grok started. Update `HANDOFF.md` (In flight, Open work) when you merge.
 
 Scripts live in `scripts/orchestrate/`. State lives in `.ai/` and `.worktrees/` (both gitignored).
 
@@ -14,7 +17,10 @@ Scripts live in `scripts/orchestrate/`. State lives in `.ai/` and `.worktrees/` 
 
 ## Phase 2 — Dispatch
 1. Base branch must be clean (`git status`); commit contracts/stubs first.
-2. Run in the background: `MAX_PARALLEL=3 scripts/orchestrate/dispatch.sh <name> <name> ...`
+2. Run in the background: `MAX_PARALLEL=3 scripts/orchestrate/dispatch.sh <name> <name>:claude ...`
+   Codex is the default worker (OS sandbox, no network). Append `:claude` for Claude Code (tool
+   allowlist, git and network denied), which suits larger refactors and docs. Mixing both in one
+   wave also spreads rate limits across two providers.
 3. Poll with `scripts/orchestrate/status.sh` (use `TAIL=20` for more log). Do not edit files inside `.worktrees/` while workers run.
 
 ## Phase 3 — Merge, integrate, QA
