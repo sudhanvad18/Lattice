@@ -3,13 +3,14 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install from the repository-root manifest, including every package it lists.
-# `mcp` is not a project dependency; the server imports it directly.
+# `mcp` is not a project dependency. Pin the last 1.x release: the server uses
+# the 1.x Server.list_tools decorator, which mcp 2.x removed.
 COPY pyproject.toml README.md ./
 COPY packages/core ./packages/core
 COPY packages/api ./packages/api
 COPY packages/mcp ./packages/mcp
 
-RUN pip install --no-cache-dir . mcp
+RUN pip install --no-cache-dir . 'mcp==1.30.0'
 
 EXPOSE 8100
 

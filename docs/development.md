@@ -10,7 +10,7 @@ source .venv/bin/activate
 python -m pip install -e '.[dev,local]'
 ```
 
-The `local` extra installs the Ollama client. `prometheus-client` is a project dependency, used by the metrics module. The optional MCP server also requires `python -m pip install mcp`.
+The `local` extra installs the Ollama client. `prometheus-client` is a project dependency, used by the metrics module. The optional MCP server also requires `python -m pip install 'mcp==1.30.0'`. That is the last 1.x release; `lattice_mcp.server` does not import on mcp 2.x.
 
 For an existing environment moved from another checkout, reinstall the editable package or use a source-path override for local checks:
 
@@ -123,7 +123,7 @@ The dashboard is a UI prototype. These contracts need alignment before presentin
 - Dashboard WebSocket paths differ from the API's `WS /ws/{task_id}` route.
 - The dashboard chat request targets `POST /chat`, which the API does not provide. Graph (`/kg/*`) and evaluation (`/eval/results`) endpoints exist.
 - Write-back handlers and approval gates exist as library components; the API task manager does not execute them automatically.
-- API and MCP images install the project from the root `pyproject.toml`. Both copy `packages/core`, `packages/api`, and `packages/mcp`, because that manifest builds `lattice`, `lattice_api`, and `lattice_mcp` into one wheel. The MCP image also installs the `mcp` package, which is not a project dependency. That install currently resolves to mcp 2.x; `lattice_mcp.server` calls `Server.list_tools`, which mcp 2.3.0 does not provide, so `python -m lattice_mcp.server` fails at import. The server is a stdio process, and the image still publishes port 8100. Helm charts and the dashboard image are unchanged and are not a deployment recipe.
+- API and MCP images install the project from the root `pyproject.toml`. Both copy `packages/core`, `packages/api`, and `packages/mcp`, because that manifest builds `lattice`, `lattice_api`, and `lattice_mcp` into one wheel. The MCP image pins `mcp==1.30.0`, the last 1.x release the current server starts with. Porting `lattice_mcp.server` to mcp 2.x is open work. The server is a stdio process, and the image still publishes port 8100. Helm charts and the dashboard image are unchanged and are not a deployment recipe.
 
 Use the offline example or model-backed Python demo as the reproducible entry point while completing these integrations. `GET /kg/communities` returns community membership, hub nodes, and surprising connections. Relation provenance is a field on `/kg/graph` edges. The dashboard graph view draws both; the README states what that view shows.
 
