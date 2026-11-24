@@ -31,7 +31,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from lattice_api.audit import AuditTrail
-from lattice_api.chat import build_chat_answer
+from lattice.inference import get_provider
+from lattice.inference.health import friendly_provider_error
+from lattice_api.chat import answer_question, build_chat_answer
+from lattice_api.errors import require_kb
 from lattice_api.eval_routes import router as eval_router
 from lattice_api.graph_routes import KnowledgeBaseDependency
 from lattice_api.graph_routes import get_knowledge_base as get_knowledge_base
@@ -339,15 +342,40 @@ def create_app(
 
     @app.post("/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest, kb: KnowledgeBaseDependency):
-        """Answer from retrieved passages and graph entities. Does not call an LLM."""
+        """Answer questions from the knowledge base, grounded by the configured model."""
+        require_kb(kb)
+
+        notice = None
+        provider = None
         try:
-            response, citations = await run_in_threadpool(
-                build_chat_answer, kb, request.message
+            provider = get_provider()
+        except Exception as exc:
+            notice = friendly_provider_error(exc) or str(exc) or "Provider configuration error."
+
+        if provider is None:
+            try:
+                response_text, _ = await run_in_threadpool(
+                    build_chat_answer, kb, request.message
+                )
+            except Exception as exc:
+                logger.error("chat_retrieval_failed", error=str(exc))
+                raise HTTPException(
+                    status_code=503, detail="Knowledge base retrieval failed"
+                ) from exc
+            return ChatResponse(
+                mode="retrieval_only",
+                response=response_text,
+                citations=[],
+                notice=notice,
             )
+
+        try:
+            return await answer_question(kb, provider, request.message, request.history)
         except Exception as exc:
             logger.error("chat_retrieval_failed", error=str(exc))
-            raise HTTPException(status_code=503, detail="Knowledge base retrieval failed") from exc
-        return ChatResponse(response=response, citations=citations)
+            raise HTTPException(
+                status_code=503, detail="Knowledge base retrieval failed"
+            ) from exc
 
     # --- WebSocket ---
     # Register /ws/activity before /ws/{task_id}. Otherwise "activity" is captured

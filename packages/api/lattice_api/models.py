@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -151,10 +151,21 @@ class CommunitiesResponse(BaseModel):
     surprising_connections: list[SurprisingConnection]
 
 
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatCitation(BaseModel):
+    source: str
+    snippet: str
+
+
 class ChatRequest(BaseModel):
     """One question from the dashboard Chat tab."""
 
     message: str = Field(..., min_length=1, max_length=5000)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=20)
 
     @field_validator("message")
     @classmethod
@@ -166,10 +177,12 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    """Retrieval-backed answer. Citations are chunk ids and entity ids."""
+    """Grounded answer with structured citations."""
 
     response: str
-    citations: list[str] = Field(default_factory=list)
+    citations: list[ChatCitation] = Field(default_factory=list)
+    mode: Literal["answer", "retrieval_only"] = "answer"
+    notice: str | None = None
 
 
 class IngestRequest(BaseModel):
