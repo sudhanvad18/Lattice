@@ -120,6 +120,17 @@ class VectorStore:
 
         return search_results
 
+    def source_counts(self) -> dict[str, int]:
+        """Chunks stored per source path."""
+        counts: dict[str, int] = {}
+        for meta in self._collection.get(include=["metadatas"])["metadatas"] or []:
+            source = str((meta or {}).get("source") or "unknown")
+            counts[source] = counts.get(source, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def chunk_ids(self) -> set[str]:
+        return set(self._collection.get(include=[])["ids"])
+
     def delete_document(self, document_id: str) -> None:
         """Remove all chunks belonging to a document."""
         self._collection.delete(where={"document_id": document_id})

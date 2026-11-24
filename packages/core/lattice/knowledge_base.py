@@ -108,6 +108,14 @@ class KnowledgeBase:
             "kg_relation_types": kg_stats.relation_types,
         }
 
+    @property
+    def is_empty(self) -> bool:
+        return self._vector_store.count == 0
+
+    def source_counts(self) -> dict[str, int]:
+        """Chunks stored per source path, sorted by path."""
+        return self._vector_store.source_counts()
+
     def ingest_file(self, path: Path) -> int:
         """Ingest a single file into both vector store and KG.
 
