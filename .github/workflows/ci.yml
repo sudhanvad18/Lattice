@@ -1,0 +1,160 @@
+# CI for Lattice.
+#
+# Python tests and the dashboard type check are required checks.
+# Ruff and ESLint report existing debt (HANDOFF open-work item 10) and do
+# not fail the workflow until that cleanup lands.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      UV_LINK_MODE: copy
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py311-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-py311-
+
+      - name: Cache uv downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-py311-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-${{ runner.os }}-py311-
+
+      # ChromaDB's default embedder downloads all-MiniLM-L6-v2 on first use.
+      - name: Cache Chroma ONNX model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/chroma
+          key: chroma-onnx-${{ runner.os }}-all-MiniLM-L6-v2
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip uv
+          uv venv --python "$(command -v python)" .venv
+          cat > /tmp/lattice-ci-excludes.txt <<'EOF'
+          sentence-transformers
+          spacy
+          EOF
+          # sentence-transformers pulls the CUDA torch stack (several GB) and
+          # spacy pulls its own runtime. The test suite imports neither.
+          # prometheus-client is imported by lattice.observability.metrics but
+          # is not declared in pyproject.toml (open-work item 8). Install it
+          # here instead of editing that shared file.
+          uv pip install --python .venv/bin/python \
+            -e '.[dev]' \
+            prometheus-client \
+            --excludes /tmp/lattice-ci-excludes.txt
+
+      - name: Run tests
+        env:
+          # Keep ChromaDB from posting anonymous telemetry during the run.
+          ANONYMIZED_TELEMETRY: "False"
+          # Leave LATTICE_TEST_NEO4J_URI/USER/PASSWORD unset so the live Neo4j
+          # test stays skipped. CI does not start a Neo4j service.
+        run: scripts/test.sh
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-ruff-${{ runner.os }}-py311
+          restore-keys: |
+            pip-ruff-${{ runner.os }}-py311-
+
+      - name: Install ruff
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install ruff
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: packages/dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: packages/dashboard
+        run: npm ci
+
+      - name: Ruff
+        # scripts/test.sh --lint with no paths only checks Python files added
+        # since HEAD, so a clean checkout would report nothing. Pass every
+        # tracked Python file so the existing ruff debt shows up in the log.
+        # TODO(open-work item 10): remove continue-on-error and let this step
+        # fail the workflow once the pre-existing ruff debt is cleaned up.
+        continue-on-error: true
+        run: |
+          mapfile -t py_files < <(git ls-files '*.py')
+          scripts/test.sh --lint "${py_files[@]}"
+
+      - name: ESLint
+        # TODO(open-work item 10): remove continue-on-error and let this step
+        # fail the workflow once the two existing ESLint errors are fixed
+        # (src/components/task-history.tsx, src/hooks/use-websocket.ts).
+        continue-on-error: true
+        working-directory: packages/dashboard
+        run: npm run lint
+
+  typecheck:
+    name: Dashboard typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: packages/dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: packages/dashboard
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: packages/dashboard
+        run: npx tsc --noEmit
