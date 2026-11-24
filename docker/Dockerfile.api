@@ -6,16 +6,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl build-essential && \
     rm -rf /var/lib/apt/lists/*
 
-COPY packages/core/ /app/packages/core/
-COPY packages/api/ /app/packages/api/
+# Install from the repository-root manifest. Copy every package it lists so
+# the wheel includes lattice, lattice_api, and lattice_mcp.
+COPY pyproject.toml README.md ./
+COPY packages/core ./packages/core
+COPY packages/api ./packages/api
+COPY packages/mcp ./packages/mcp
 
-RUN pip install --no-cache-dir \
-    fastapi uvicorn[standard] pydantic pydantic-settings \
-    langfuse opentelemetry-api opentelemetry-sdk prometheus-client \
-    structlog chromadb redis httpx langgraph langchain-core neo4j \
-    -e /app/packages/core
-
-COPY packages/api/ /app/packages/api/
+RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 

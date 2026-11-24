@@ -7,10 +7,10 @@ Use Python 3.11 or later. `packages/core/` does not contain a separate package m
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev,local]' prometheus-client
+python -m pip install -e '.[dev,local]'
 ```
 
-The `local` extra installs the Ollama client. `prometheus-client` is used by the metrics module and is listed explicitly here because it is not declared in the current package dependencies. The optional MCP server also requires `python -m pip install mcp`.
+The `local` extra installs the Ollama client. `prometheus-client` is a project dependency, used by the metrics module. The optional MCP server also requires `python -m pip install 'mcp==1.30.0'`. That is the last 1.x release; `lattice_mcp.server` does not import on mcp 2.x.
 
 For an existing environment moved from another checkout, reinstall the editable package or use a source-path override for local checks:
 
@@ -57,6 +57,8 @@ Copy `.env.example` to `.env` if local configuration is needed. Settings use the
 uvicorn lattice_api.app:app --reload --host 127.0.0.1 --port 8000
 ```
 
+`lattice serve` starts the same application, on `127.0.0.1:8000` by default, and sets `LATTICE_DATA_DIR` from the CLI `--data-dir` before the process starts.
+
 Explore `http://localhost:8000/docs`. With Ollama running and its model available, submit a task:
 
 ```bash
@@ -73,6 +75,15 @@ Use the returned `task_id` with:
 | `GET /tasks/{task_id}/result` | Artifacts, review history, and audit trail. |
 | `GET /tasks/{task_id}/audit` | Recorded audit events. |
 | `WS /ws/{task_id}` | Task event stream. |
+| `GET /kg/graph` | Graph nodes and edges. `limit` defaults to 500. |
+| `GET /kg/stats` | Chunk, entity, and relation counts, plus the backend name. |
+| `GET /kg/entities` | Entities, optionally filtered by `q`, `entity_type`, and `limit`. |
+| `GET /kg/entities/{entity_id}` | One entity, its neighbors, and its relations. |
+| `GET /kg/communities` | Communities, hub nodes, and surprising connections. |
+| `POST /kg/ingest` | JSON body with `text` and optional `source`. Returns the chunk count and knowledge-base stats. Text shorter than 50 tokens stores no chunks. |
+| `GET /eval/results` | Latest `lattice eval` report, or an empty payload when none is stored. |
+
+`/kg/*` returns 503 when the knowledge base is not available. `GET /eval/results` reads `<data-dir>/eval/latest.json`.
 
 API tasks use the knowledge base in `LATTICE_DATA_DIR` (default `data/`); populate it with `lattice ingest <dir>` first, or use the Python demo for a self-contained graph/vector context. Current API authentication is a placeholder; the local development service is not a production deployment recipe.
 
@@ -112,9 +123,9 @@ The dashboard is a UI prototype. These contracts need alignment before presentin
 - Dashboard WebSocket paths differ from the API's `WS /ws/{task_id}` route.
 - The dashboard chat request targets `POST /chat`, which the API does not provide. Graph (`/kg/*`) and evaluation (`/eval/results`) endpoints exist.
 - Write-back handlers and approval gates exist as library components; the API task manager does not execute them automatically.
-- Container/deployment files require integration work. In particular, API/MCP Dockerfiles reference a package-local installation path while the package manifest is at the repository root.
+- API and MCP images install the project from the root `pyproject.toml`. Both copy `packages/core`, `packages/api`, and `packages/mcp`, because that manifest builds `lattice`, `lattice_api`, and `lattice_mcp` into one wheel. The MCP image pins `mcp==1.30.0`, the last 1.x release the current server starts with. Porting `lattice_mcp.server` to mcp 2.x is open work. The server is a stdio process, and the image still publishes port 8100. Helm charts and the dashboard image are unchanged and are not a deployment recipe.
 
-Use the offline example or model-backed Python demo as the reproducible entry point while completing these integrations. Graph provenance/clustering and additional ingestion parsers should be documented with their source and tests once included in the published revision.
+Use the offline example or model-backed Python demo as the reproducible entry point while completing these integrations. `GET /kg/communities` returns community membership, hub nodes, and surprising connections. Relation provenance is a field on `/kg/graph` edges. The dashboard graph view draws both; the README states what that view shows.
 
 ## Record a useful demo
 
