@@ -183,7 +183,33 @@ class IngestResponse(BaseModel):
     stats: dict[str, Any]
 
 
+class EvalKBSnapshot(BaseModel):
+    chunks: int
+    entities: int
+    sources: int
+
+
+class EvalRunRequest(BaseModel):
+    limit: int = Field(5, ge=1, le=10)
+
+
+class EvalRunAccepted(BaseModel):
+    run_id: str
+    tasks: int
+
+
+class EvalStatus(BaseModel):
+    running: bool = False
+    run_id: str | None = None
+    started_at: datetime | None = None
+    completed: int = 0
+    total: int = 0
+    error: str | None = None
+
+
 class EvalTaskResult(BaseModel):
+    groundedness: float = 0.0
+    category: str | None = None
     task_id: str
     task_name: str
     status: str
@@ -199,6 +225,7 @@ class EvalTaskResult(BaseModel):
 
 
 class EvalSummary(BaseModel):
+    avg_groundedness: float = 0.0
     total_tasks: int
     completion_rate: float
     pass_rate: float
@@ -211,6 +238,7 @@ class EvalSummary(BaseModel):
 class EvalRunResponse(BaseModel):
     """Latest ``lattice eval`` run; ``run_at`` is None when no run exists yet."""
 
+    kb: EvalKBSnapshot | None = None
     run_at: datetime | None = None
     provider: str | None = None
     model: str | None = None

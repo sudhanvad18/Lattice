@@ -1,15 +1,16 @@
-from lattice.evaluation.engine import (
-    BenchmarkReport,
-    DEMO_BENCHMARK_TASKS,
-    EvalResult,
-    EvalTask,
-    EvaluationEngine,
-    load_report,
-    save_report,
-)
 from lattice.evaluation.citation_utility import (
     CitationUtilityEvaluator,
     CitationUtilityScore,
+)
+from lattice.evaluation.engine import (
+    DEMO_BENCHMARK_TASKS,
+    BenchmarkReport,
+    EvalResult,
+    EvalTask,
+    EvaluationEngine,
+    generate_kb_tasks,
+    load_report,
+    save_report,
 )
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "EvalResult",
     "EvalTask",
     "EvaluationEngine",
+    "generate_kb_tasks",
     "load_report",
     "save_report",
 ]

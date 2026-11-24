@@ -1,14 +1,19 @@
 """GET /eval/results serves the latest `lattice eval` run."""
 
-from unittest.mock import MagicMock
+import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from lattice.evaluation import BenchmarkReport, EvalResult, save_report
+from lattice.graph.models import Entity
 from lattice.inference.mock import MockProvider
+from lattice_api import eval_routes
 from lattice_api.app import create_app
+from lattice_api.errors import api_error
 from lattice_api.eval_routes import eval_results_path
+from lattice_api.models import EvalStatus
 from lattice_api.task_manager import TaskManager
 
 
@@ -19,7 +24,17 @@ def results_path(tmp_path):
 
 @pytest.fixture
 def client(results_path):
-    app = create_app(task_manager=TaskManager(provider=MockProvider()), knowledge_base=MagicMock())
+    eval_routes._status = EvalStatus()
+    kb = MagicMock()
+    kb.is_empty = False
+    kb.stats = {"chunks_stored": 1, "kg_entities": 1}
+    kb.source_counts.return_value = {"test.py": 1}
+    kb.graph.get_all_entities.return_value = [
+        Entity(id="entity", name="Widget", entity_type="class"),
+    ]
+    kb.graph.get_all_relations.return_value = []
+    kb.vector_store.chunk_ids.return_value = ["chunk"]
+    app = create_app(task_manager=TaskManager(provider=MockProvider()), knowledge_base=kb)
     app.dependency_overrides[eval_results_path] = lambda: results_path
     with TestClient(app) as test_client:
         yield test_client
@@ -29,7 +44,7 @@ def test_no_run_returns_empty_payload(client):
     response = client.get("/eval/results")
     assert response.status_code == 200
     assert response.json() == {
-        "run_at": None, "provider": None, "model": None, "summary": None, "results": [],
+        "run_at": None, "provider": None, "model": None, "summary": None, "results": [], "kb": None,
     }
 
 
@@ -62,3 +77,82 @@ def test_saved_run_is_served(client, results_path):
     assert row["keyword_recall"] == pytest.approx(2 / 3)
     assert row["keywords_missing"] == ["user"]
     assert row["iterations"] == 2
+
+
+def test_run_rejects_empty_kb(client):
+    client.app.state.knowledge_base.is_empty = True
+    response = client.post("/eval/run")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "kb_empty"
+
+
+def test_run_rejects_provider_down(client, monkeypatch):
+    monkeypatch.setattr(eval_routes, "require_provider", AsyncMock(
+        side_effect=api_error(503, "provider_unavailable", "Start Ollama"),
+    ))
+    response = client.post("/eval/run", json={"limit": 1})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "provider_unavailable"
+    assert client.get("/eval/status").json()["running"] is False
+
+
+def test_run_saves_results(client, results_path, monkeypatch):
+    from lattice_api.app import get_task_manager
+
+    events = MagicMock()
+    monkeypatch.setattr(get_task_manager(), "emit", events, raising=False)
+    monkeypatch.setattr(eval_routes, "require_provider", AsyncMock())
+    monkeypatch.setattr(eval_routes, "get_provider", MockProvider)
+    response = client.post("/eval/run", json={"limit": 1})
+    assert response.status_code == 202
+    assert response.json()["tasks"] == 1
+    for _ in range(100):
+        status = client.get("/eval/status").json()
+        if not status["running"]:
+            break
+        time.sleep(0.01)
+    assert status["running"] is False
+    assert status["error"] is None
+    assert status["completed"] == status["total"] == 1
+    assert status["run_id"] == response.json()["run_id"]
+    assert results_path.exists()
+    body = client.get("/eval/results").json()
+    assert body["kb"] == {"chunks": 1, "entities": 1, "sources": 1}
+    assert body["results"][0]["task_id"] == "kb-widget"
+    assert [call.args[1] for call in events.call_args_list] == [
+        "eval_started", "eval_progress", "eval_complete",
+    ]
+    assert events.call_args_list[1].args[2] == {"completed": 1, "total": 1}
+
+
+def test_run_busy_and_limit_validation(client):
+    eval_routes._status = EvalStatus(running=True)
+    response = client.post("/eval/run")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "busy"
+    assert client.post("/eval/run", json={"limit": 0}).status_code == 422
+    assert client.post("/eval/run", json={"limit": 11}).status_code == 422
+
+
+def test_initial_status(client):
+    assert client.get("/eval/status").json() == {
+        "running": False, "run_id": None, "started_at": None,
+        "completed": 0, "total": 0, "error": None,
+    }
+
+
+def test_failed_run_releases_holder(client, monkeypatch):
+    monkeypatch.setattr(eval_routes, "require_provider", AsyncMock())
+    monkeypatch.setattr(eval_routes, "get_provider", MockProvider)
+    monkeypatch.setattr(eval_routes.EvaluationEngine, "run_benchmark", AsyncMock(
+        side_effect=RuntimeError("Evaluation interrupted"),
+    ))
+    assert client.post("/eval/run").status_code == 202
+    for _ in range(100):
+        status = client.get("/eval/status").json()
+        if not status["running"]:
+            break
+        time.sleep(0.01)
+    assert status["running"] is False
+    assert status["error"] == "Evaluation interrupted"
+    assert client.post("/eval/run").status_code == 202
