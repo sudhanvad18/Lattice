@@ -80,14 +80,14 @@ The orchestrator tracks dependencies between research and writing subtasks. Revi
 | Agent runtime | Planning, research/writing dispatch, artifact review, revision loops, and a tool-use interface. |
 | Knowledge layer | NetworkX/Neo4j graph backends, ChromaDB storage, document ingestion, retrieval, and reranking components. |
 | Command line | `ingest`, `stats`, `search`, `graph`, `run`, `eval`, `serve`, and `reset` against a local data directory. |
-| Task API | Submit/list tasks; retrieve status, results, and audit events; stream task events over WebSocket. |
+| Task API | Submit/list tasks; retrieve status, results, and audit events. `WS /ws/{task_id}` streams one task. `WS /ws/activity` streams every task. `POST /chat` returns retrieved passages and graph entities and does not call a model. |
 | Knowledge graph API | `GET /kg/graph`, `/kg/stats`, `/kg/entities`, `/kg/entities/{entity_id}`, and `/kg/communities`. `POST /kg/ingest` accepts text and returns how many chunks were stored, plus knowledge-base stats. Text under the chunker's minimum (50 tokens) stores no chunks. These routes answer 503 when the knowledge base is not available. |
 | Evaluation API | `GET /eval/results` returns the latest `lattice eval` report. A missing or unreadable report is an empty payload (`run_at` is null). |
 | Dashboard graph | The Knowledge Graph view draws `/kg/graph` with `react-force-graph` in 3D or 2D. A node with a community id uses that id for its colour; hub nodes are drawn larger; selecting a node dims the others; an insights panel lists hubs and surprising links from `/kg/communities`. Built-in demo nodes appear only when the API cannot be reached. The Evaluations view reads `/eval/results` and uses demo figures only in that same unreachable case. |
 | Write-back library | File, GitHub, and knowledge-graph handlers with validation, approval gates, history, and rollback interfaces. |
 | Observability and evaluation | Local trace records, optional exporters, Prometheus metric definitions, evaluation utilities, and mock-based regression tests. |
 
-The Next.js dashboard, MCP server, and deployment manifests are integration surfaces under development. The default API task path does not automatically invoke the write-back engine or enforce its approval gates. Dashboard task submission, history, the activity stream, and chat still do not match the API; the graph and evaluation views call `/kg/*` and `/eval/results`. [Development notes](docs/development.md#integration-status) document those boundaries.
+The Next.js dashboard, MCP server, and deployment manifests are integration surfaces under development. The default API task path does not automatically invoke the write-back engine or enforce its approval gates. Dashboard task submission and history use the task API (`task`, `task_id`, `original_task`). The activity view uses `WS /ws/activity`, and a single task uses `WS /ws/{task_id}`. Chat posts to `POST /chat`, which returns retrieved passages and knowledge-graph entities and does not call a model. The graph and evaluation views call `/kg/*` and `/eval/results`. [Development notes](docs/development.md#integration-status) document the remaining boundaries.
 
 ## Repository map
 
