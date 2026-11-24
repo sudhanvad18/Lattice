@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { KBProvider } from "@/lib/kb-context";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -13,7 +14,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className="bg-zinc-950 text-zinc-100 antialiased">{children}</body>
+      <body className="bg-zinc-950 text-zinc-100 antialiased">
+        <KBProvider>{children}</KBProvider>
+      </body>
     </html>
   );
 }
