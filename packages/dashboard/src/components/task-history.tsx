@@ -2,38 +2,61 @@
 
 import { useEffect, useState } from "react";
 import { History, ChevronRight, FileText, Code, Search, CheckCircle2, XCircle, Clock } from "lucide-react";
-import { getTasks, getTask, Task, Artifact } from "@/lib/api";
+import { ApiError, getTasks, getTaskResult, Task, Artifact } from "@/lib/api";
 
 export function TaskHistory() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [loading, setLoading] = useState(true);
+  const [offline, setOffline] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
 
   useEffect(() => {
-    loadTasks();
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await getTasks();
+        if (cancelled) return;
+        setTasks(data);
+        setOffline(false);
+        setNotice(null);
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof ApiError) {
+          setTasks([]);
+          setOffline(false);
+          setNotice(err.message);
+        } else {
+          setTasks(getDemoTasks());
+          setOffline(true);
+          setNotice("API unreachable. Showing sample tasks.");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
-
-  const loadTasks = async () => {
-    try {
-      const data = await getTasks();
-      setTasks(data);
-    } catch {
-      setTasks(getDemoTasks());
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const selectTask = async (task: Task) => {
     setSelectedTask(task);
     setSelectedArtifact(null);
-    try {
-      const detail = await getTask(task.id);
-      setArtifacts(detail.artifacts || []);
-    } catch {
+    setDetailError(null);
+    if (offline) {
       setArtifacts(getDemoArtifacts());
+      return;
+    }
+    try {
+      const detail = await getTaskResult(task.task_id);
+      setArtifacts(detail.artifacts || []);
+    } catch (err) {
+      setArtifacts([]);
+      setDetailError(err instanceof Error ? err.message : "Could not load artifacts");
     }
   };
 
@@ -48,24 +71,28 @@ export function TaskHistory() {
         <div className="p-4 border-b border-zinc-800">
           <h2 className="text-lg font-bold">Task History</h2>
           <p className="text-xs text-zinc-500 mt-1">{tasks.length} tasks</p>
+          {notice && <p className="text-xs text-amber-400/90 mt-2">{notice}</p>}
         </div>
         <div className="p-2 space-y-1">
+          {tasks.length === 0 && (
+            <p className="px-3 py-6 text-sm text-zinc-500">No tasks yet.</p>
+          )}
           {tasks.map((task) => (
             <button
-              key={task.id}
+              key={task.task_id}
               onClick={() => selectTask(task)}
               className={`w-full text-left px-3 py-3 rounded-lg transition-colors ${
-                selectedTask?.id === task.id
+                selectedTask?.task_id === task.task_id
                   ? "bg-zinc-800 border border-zinc-700"
                   : "hover:bg-zinc-900"
               }`}
             >
               <div className="flex items-start justify-between">
-                <p className="text-sm text-zinc-200 line-clamp-2">{task.goal}</p>
+                <p className="text-sm text-zinc-200 line-clamp-2">{task.original_task}</p>
                 <TaskStatusIcon status={task.status} />
               </div>
               <div className="flex items-center gap-2 mt-1.5">
-                <span className="text-xs text-zinc-600 font-mono">{task.id.slice(0, 8)}</span>
+                <span className="text-xs text-zinc-600 font-mono">{task.task_id.slice(0, 8)}</span>
                 <span className="text-xs text-zinc-600">
                   {new Date(task.created_at).toLocaleDateString()}
                 </span>
@@ -90,13 +117,14 @@ export function TaskHistory() {
             <div className="p-4 border-b border-zinc-800">
               <div className="flex items-center gap-2">
                 <TaskStatusIcon status={selectedTask.status} />
-                <h2 className="font-medium">{selectedTask.goal}</h2>
+                <h2 className="font-medium">{selectedTask.original_task}</h2>
               </div>
               <div className="flex items-center gap-4 mt-2 text-xs text-zinc-500">
-                <span>ID: {selectedTask.id.slice(0, 12)}</span>
+                <span>ID: {selectedTask.task_id.slice(0, 12)}</span>
                 <span>Created: {new Date(selectedTask.created_at).toLocaleString()}</span>
-                <span>Approval: {selectedTask.approval_mode}</span>
+                {selectedTask.approval_mode && <span>Approval: {selectedTask.approval_mode}</span>}
               </div>
+              {detailError && <p className="text-xs text-red-300 mt-2">{detailError}</p>}
             </div>
 
             {/* Artifacts */}
@@ -106,6 +134,9 @@ export function TaskHistory() {
                 <p className="px-2 py-1 text-xs text-zinc-500 font-medium uppercase">
                   Artifacts ({artifacts.length})
                 </p>
+                {artifacts.length === 0 && !detailError && (
+                  <p className="px-2 py-3 text-xs text-zinc-500">No artifacts yet.</p>
+                )}
                 {artifacts.map((artifact) => (
                   <button
                     key={artifact.id}
@@ -177,7 +208,11 @@ function TaskStatusIcon({ status }: { status: string }) {
     case "failed":
       return <XCircle className="w-4 h-4 text-red-400 shrink-0" />;
     case "running":
+    case "in_progress":
+    case "needs_review":
       return <Clock className="w-4 h-4 text-amber-400 shrink-0 animate-pulse" />;
+    case "rejected":
+      return <XCircle className="w-4 h-4 text-red-400 shrink-0" />;
     default:
       return <Clock className="w-4 h-4 text-zinc-500 shrink-0" />;
   }
@@ -196,10 +231,10 @@ function ArtifactIcon({ type }: { type: string }) {
 
 function getDemoTasks(): Task[] {
   return [
-    { id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", goal: "Generate turbine maintenance documentation", status: "completed", created_at: "2026-07-28T10:00:00Z", approval_mode: "on_low_confidence" },
-    { id: "b2c3d4e5-f6a7-8901-bcde-f12345678901", goal: "Code review: authentication middleware refactor", status: "completed", created_at: "2026-07-27T14:30:00Z", approval_mode: "always" },
-    { id: "c3d4e5f6-a7b8-9012-cdef-123456789012", goal: "Draft API migration plan from REST to GraphQL", status: "running", created_at: "2026-07-28T16:00:00Z", approval_mode: "on_low_confidence" },
-    { id: "d4e5f6a7-b8c9-0123-defa-234567890123", goal: "Analyze thermal fatigue patterns in Q3 data", status: "failed", created_at: "2026-07-26T09:15:00Z", approval_mode: "never" },
+    { task_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", original_task: "Generate turbine maintenance documentation", status: "completed", created_at: "2026-07-28T10:00:00Z", approval_mode: "on_low_confidence" },
+    { task_id: "b2c3d4e5-f6a7-8901-bcde-f12345678901", original_task: "Code review: authentication middleware refactor", status: "completed", created_at: "2026-07-27T14:30:00Z", approval_mode: "always" },
+    { task_id: "c3d4e5f6-a7b8-9012-cdef-123456789012", original_task: "Draft API migration plan from REST to GraphQL", status: "in_progress", created_at: "2026-07-28T16:00:00Z", approval_mode: "on_low_confidence" },
+    { task_id: "d4e5f6a7-b8c9-0123-defa-234567890123", original_task: "Analyze thermal fatigue patterns in Q3 data", status: "failed", created_at: "2026-07-26T09:15:00Z", approval_mode: "never" },
   ];
 }
 

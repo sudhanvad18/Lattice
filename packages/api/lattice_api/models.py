@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TaskSubmitRequest(BaseModel):
@@ -149,6 +149,27 @@ class CommunitiesResponse(BaseModel):
     communities: list[Community]
     god_nodes: list[EntityReference]
     surprising_connections: list[SurprisingConnection]
+
+
+class ChatRequest(BaseModel):
+    """One question from the dashboard Chat tab."""
+
+    message: str = Field(..., min_length=1, max_length=5000)
+
+    @field_validator("message")
+    @classmethod
+    def message_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("message must not be blank")
+        return stripped
+
+
+class ChatResponse(BaseModel):
+    """Retrieval-backed answer. Citations are chunk ids and entity ids."""
+
+    response: str
+    citations: list[str] = Field(default_factory=list)
 
 
 class IngestRequest(BaseModel):

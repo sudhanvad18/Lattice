@@ -1,12 +1,26 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export interface Task {
-  id: string;
-  goal: string;
-  status: "pending" | "running" | "completed" | "failed";
+  task_id: string;
+  original_task: string;
+  status: string;
   created_at: string;
-  completed_at?: string;
-  approval_mode: string;
+  current_agent?: string | null;
+  iteration_count?: number;
+  artifact_count?: number;
+  review_count?: number;
+  updated_at?: string | null;
+  errors?: string[];
+  approval_mode?: string;
+}
+
+export interface TaskResult {
+  task_id: string;
+  status: string;
+  original_task: string;
+  artifacts: Artifact[];
+  reviews?: Record<string, unknown>[];
+  iteration_count?: number;
 }
 
 export interface Artifact {
@@ -89,11 +103,11 @@ export interface KGEdge {
   provenance?: string;
 }
 
-export function submitTask(goal: string, approvalMode: string = "on_low_confidence"): Promise<Task> {
+export function submitTask(task: string, approvalMode: string = "on_low_confidence"): Promise<Task> {
   return request("/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ goal, approval_mode: approvalMode }),
+    body: JSON.stringify({ task, approval_mode: approvalMode }),
   });
 }
 
@@ -101,8 +115,12 @@ export function getTasks(): Promise<Task[]> {
   return request("/tasks");
 }
 
-export function getTask(id: string): Promise<Task & { artifacts: Artifact[] }> {
+export function getTask(id: string): Promise<Task> {
   return request(`/tasks/${id}`);
+}
+
+export function getTaskResult(id: string): Promise<TaskResult> {
+  return request(`/tasks/${id}/result`);
 }
 
 export function getAuditTrail(taskId: string): Promise<AgentEvent[]> {
@@ -177,7 +195,64 @@ export function chatQuery(message: string): Promise<{ response: string; citation
 }
 
 export function createWebSocket(taskId?: string): WebSocket {
-  const wsBase = API_BASE.replace("http", "ws");
-  const path = taskId ? `/ws/tasks/${taskId}` : "/ws/activity";
+  const wsBase = API_BASE.startsWith("https://")
+    ? `wss://${API_BASE.slice("https://".length)}`
+    : API_BASE.startsWith("http://")
+      ? `ws://${API_BASE.slice("http://".length)}`
+      : API_BASE.replace(/^http/, "ws");
+  const path = taskId ? `/ws/${encodeURIComponent(taskId)}` : "/ws/activity";
   return new WebSocket(`${wsBase}${path}`);
+}
+
+export function normalizeAgentEvent(raw: unknown, fallbackTaskId = ""): AgentEvent | null {
+  if (!raw || typeof raw !== "object") return null;
+  const msg = raw as Record<string, unknown>;
+  if (msg.event === "ping") return null;
+
+  if (typeof msg.event === "string") {
+    const data = msg.data && typeof msg.data === "object"
+      ? msg.data as Record<string, unknown>
+      : {};
+    const taskId = typeof msg.task_id === "string" && msg.task_id ? msg.task_id : fallbackTaskId;
+    return {
+      timestamp: typeof msg.timestamp === "string" ? msg.timestamp : new Date().toISOString(),
+      agent: typeof data.agent === "string" && data.agent ? data.agent : "system",
+      event_type: mapEventType(msg.event),
+      details: describeEvent(msg.event, data),
+      task_id: taskId,
+    };
+  }
+
+  if (typeof msg.event_type === "string" && typeof msg.details === "string") {
+    return {
+      timestamp: typeof msg.timestamp === "string" ? msg.timestamp : new Date().toISOString(),
+      agent: typeof msg.agent === "string" && msg.agent ? msg.agent : "system",
+      event_type: msg.event_type as AgentEvent["event_type"],
+      details: msg.details,
+      task_id: typeof msg.task_id === "string" && msg.task_id ? msg.task_id : fallbackTaskId,
+    };
+  }
+  return null;
+}
+
+function mapEventType(event: string): AgentEvent["event_type"] {
+  if (event === "error" || event.endsWith("_failed") || event.endsWith("_rejected")) return "error";
+  if (event === "llm_call") return "llm_call";
+  if (event === "tool_call") return "tool_call";
+  if (event === "task_complete" || event === "task_completed" || event === "agent_completed") {
+    return "completed";
+  }
+  return "started";
+}
+
+function describeEvent(event: string, data: Record<string, unknown>): string {
+  if (typeof data.summary === "string" && data.summary) return data.summary;
+  if (typeof data.message === "string" && data.message) return data.message;
+  if (typeof data.task === "string" && data.task) return data.task;
+  if (event === "task_complete" || event === "task_completed") {
+    const status = typeof data.status === "string" ? data.status : "finished";
+    const artifacts = typeof data.artifacts === "number" ? data.artifacts : 0;
+    return `Task ${status} (${artifacts} artifacts)`;
+  }
+  return event.replace(/_/g, " ");
 }
