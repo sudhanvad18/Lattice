@@ -38,9 +38,9 @@ export default function Dashboard() {
   // Derive active view: manual override wins; until kb loads show "kb"; then pick based on readiness.
   const activeView: View = manualView ?? (kb === null ? "kb" : kb.ready ? "ask" : "kb");
 
-  const providerReachable = apiReachable && !!health && !health.provider.detail;
+  const providerReachable = apiReachable && !!health && !!health.provider?.reachable;
   const providerLabel =
-    health ? `${health.provider.name} / ${health.provider.model}` : null;
+    health?.provider ? `${health.provider.name} / ${health.provider.model}` : null;
 
   return (
     <div className="flex h-screen">
@@ -87,7 +87,7 @@ export default function Dashboard() {
               <span className="text-xs text-red-400">API offline</span>
             ) : providerLabel ? (
               <span
-                title={health?.provider.detail}
+                title={health?.provider?.detail ?? undefined}
                 className={`text-xs truncate ${
                   providerReachable ? "text-emerald-400" : "text-amber-400"
                 }`}
@@ -97,7 +97,7 @@ export default function Dashboard() {
             ) : (
               <span className="text-xs text-zinc-500">Connecting...</span>
             )}
-            {!providerReachable && health?.provider.detail && (
+            {!providerReachable && health?.provider?.detail && (
               <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
             )}
           </div>

@@ -63,7 +63,7 @@ export function KnowledgeBaseView() {
           [...prev, { event: ev, message, timestamp: new Date() }].slice(-50),
         );
 
-        if (ev === "kb_ingest_complete" || ev === "kb_ingest_error") {
+        if (ev === "kb_ingest_complete" || ev === "kb_ingest_failed") {
           setIngesting(false);
           if (ev === "kb_ingest_complete") {
             refresh();
@@ -114,11 +114,11 @@ export function KnowledgeBaseView() {
   }, [refresh]);
 
   const filteredSources = kb?.sources.filter((s) =>
-    !filter || s.path.toLowerCase().includes(filter.toLowerCase()),
+    !filter || s.source.toLowerCase().includes(filter.toLowerCase()),
   ) ?? [];
 
-  const lastIngested = kb?.last_ingested
-    ? new Date(kb.last_ingested).toLocaleString()
+  const lastIngested = kb?.last_ingested_at
+    ? new Date(kb.last_ingested_at).toLocaleString()
     : "Never";
 
   return (
@@ -195,14 +195,14 @@ export function KnowledgeBaseView() {
               <div key={i} className="flex items-start gap-2 text-xs">
                 {m.event === "kb_ingest_complete" ? (
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 mt-0.5 shrink-0" />
-                ) : m.event === "kb_ingest_error" ? (
+                ) : m.event === "kb_ingest_failed" ? (
                   <AlertTriangle className="w-3.5 h-3.5 text-red-400 mt-0.5 shrink-0" />
                 ) : (
                   <Loader2 className="w-3.5 h-3.5 text-zinc-400 mt-0.5 shrink-0 animate-spin" />
                 )}
                 <span className={
                   m.event === "kb_ingest_complete" ? "text-emerald-300" :
-                  m.event === "kb_ingest_error" ? "text-red-300" : "text-zinc-400"
+                  m.event === "kb_ingest_failed" ? "text-red-300" : "text-zinc-400"
                 }>
                   {m.message}
                 </span>
@@ -251,7 +251,7 @@ export function KnowledgeBaseView() {
                 {filteredSources.map((s, i) => (
                   <tr key={i} className="border-t border-zinc-800/50 hover:bg-zinc-800/30">
                     <td className="px-4 py-2 font-mono text-xs text-zinc-300 truncate max-w-xs">
-                      {s.path}
+                      {s.source}
                     </td>
                     <td className="px-4 py-2 text-right text-zinc-400">{s.chunks}</td>
                   </tr>

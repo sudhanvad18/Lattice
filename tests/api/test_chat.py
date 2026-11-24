@@ -72,7 +72,23 @@ def test_answer_mode_cites_sources(kb, monkeypatch):
     assert len(body["citations"]) == 1
     citation = body["citations"][0]
     assert citation["source"] == "eng_doc.txt"
+    assert (citation["index"], citation["kind"]) == (1, "chunk")
+    assert citation["id"]
     assert "sand ingestion" in citation["snippet"]
+
+
+def test_citation_index_matches_marker_and_prompt_has_full_chunk(kb, monkeypatch):
+    long_tail = "Inspection detail. " * 30
+    kb.ingest_text("Fan blade erosion detail. " + long_tail, source="long.txt")
+    provider = MockProvider(responses=["See [2]."])
+    monkeypatch.setattr("lattice_api.app.get_provider", lambda: provider)
+
+    body = TestClient(create_app(knowledge_base=kb)).post(
+        "/chat", json={"message": "fan blade erosion inspection detail"}
+    ).json()
+
+    assert [c["index"] for c in body["citations"]] == [2]
+    assert long_tail.strip() in provider.last_messages[-1].content
 
     # Prompt sent to provider contains the chunk text
     user_msg = provider.last_messages[-1].content

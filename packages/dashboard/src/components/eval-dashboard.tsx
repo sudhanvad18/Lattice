@@ -20,7 +20,7 @@ export function EvalDashboard() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const kbReady = kb?.ready ?? false;
-  const modelReachable = apiReachable && !!health && !health.provider.detail;
+  const modelReachable = apiReachable && !!health && !!health.provider?.reachable;
 
   const load = useCallback(() => {
     return getEvalResults()
@@ -92,7 +92,7 @@ export function EvalDashboard() {
   const runDisabledReason = !kbReady
     ? "Knowledge base is empty"
     : !modelReachable
-      ? (health?.provider.detail ?? "Model unavailable")
+      ? (health?.provider?.detail ?? "Model unavailable")
       : running
         ? "Benchmark already running"
         : null;

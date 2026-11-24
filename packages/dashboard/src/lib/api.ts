@@ -109,13 +109,16 @@ export interface EvalRun {
   model: string | null;
   summary: EvalSummary | null;
   results: EvalResult[];
-  kb?: { chunks: number; entities: number };
+  kb?: { chunks: number; entities: number; sources: number } | null;
 }
 
 export interface EvalStatus {
   running: boolean;
+  run_id: string | null;
+  started_at: string | null;
   completed: number;
   total: number;
+  error: string | null;
 }
 
 // --- Health types ---
@@ -123,19 +126,20 @@ export interface EvalStatus {
 export interface HealthProvider {
   name: string;
   model: string;
-  /** Absent when reachable; present with an explanation when not. */
-  detail?: string;
+  reachable: boolean;
+  /** Actionable explanation when not reachable. */
+  detail: string | null;
 }
 
 export interface HealthResponse {
   status: string;
-  provider: HealthProvider;
+  provider: HealthProvider | null;
 }
 
 // --- Knowledge base types ---
 
 export interface KBSource {
-  path: string;
+  source: string;
   chunks: number;
 }
 
@@ -145,22 +149,28 @@ export interface KBStatus {
   entities: number;
   relations: number;
   communities: number;
-  last_ingested: string | null;
+  last_ingested_at: string | null;
   sources: KBSource[];
+  ingesting: boolean;
+  data_dir: string;
 }
 
 // --- Chat types ---
 
 export interface ChatCitation {
+  /** Matches the `[n]` markers in the response text. */
+  index: number;
+  kind: "chunk" | "entity";
+  id: string;
   source: string;
   snippet: string;
 }
 
 export interface ChatResponse {
-  answer: string;
+  response: string;
   citations: ChatCitation[];
-  mode: string;
-  notice?: string;
+  mode: "answer" | "retrieval_only";
+  notice: string | null;
 }
 
 // --- Graph types ---
@@ -245,7 +255,7 @@ export function getKBStatus(): Promise<KBStatus> {
   return request("/kb/status");
 }
 
-export function ingestPath(path: string, reset: boolean): Promise<void> {
+export function ingestPath(path: string, reset: boolean): Promise<{ job_id: string; path: string }> {
   return request("/kb/ingest", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -253,7 +263,7 @@ export function ingestPath(path: string, reset: boolean): Promise<void> {
   });
 }
 
-export function resetKB(): Promise<void> {
+export function resetKB(): Promise<KBStatus> {
   return request("/kb/reset", { method: "POST" });
 }
 
@@ -267,7 +277,7 @@ export function getEvalStatus(): Promise<EvalStatus> {
   return request("/eval/status");
 }
 
-export function runEval(limit?: number): Promise<void> {
+export function runEval(limit?: number): Promise<{ run_id: string; tasks: number }> {
   return request("/eval/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -389,9 +399,12 @@ function describeEvent(event: string, data: Record<string, unknown>): string {
   if (typeof data.summary === "string" && data.summary) return data.summary;
 
   // KB ingest events
-  if (event === "kb_ingest_start") return "Knowledge base ingestion started";
-  if (event === "kb_ingest_complete") return "Knowledge base ingestion complete";
-  if (event === "kb_ingest_error")
+  if (event === "kb_ingest_started") return "Knowledge base ingestion started";
+  if (event === "kb_ingest_complete") {
+    const n = (k: string) => (typeof data[k] === "number" ? data[k] : 0);
+    return `Ingested ${n("chunks")} chunks: ${n("entities")} entities, ${n("relations")} relations`;
+  }
+  if (event === "kb_ingest_failed")
     return typeof data.message === "string" && data.message
       ? `Ingestion failed: ${data.message}`
       : "Knowledge base ingestion failed";
@@ -399,9 +412,12 @@ function describeEvent(event: string, data: Record<string, unknown>): string {
     return typeof data.message === "string" && data.message ? data.message : "Ingesting...";
 
   // Eval events
-  if (event === "eval_start") return "Evaluation benchmark started";
-  if (event === "eval_complete") return "Evaluation benchmark complete";
-  if (event === "eval_error")
+  if (event === "eval_started") return "Evaluation benchmark started";
+  if (event === "eval_complete")
+    return typeof data.pass_rate === "number"
+      ? `Benchmark complete: ${Math.round(data.pass_rate * 100)}% passed`
+      : "Evaluation benchmark complete";
+  if (event === "eval_failed")
     return typeof data.message === "string" && data.message
       ? `Benchmark failed: ${data.message}`
       : "Evaluation benchmark failed";

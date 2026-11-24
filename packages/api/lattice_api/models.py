@@ -158,6 +158,11 @@ class ChatTurn(BaseModel):
 
 
 class ChatCitation(BaseModel):
+    """Numbered source; `index` matches the `[n]` markers in the answer text."""
+
+    index: int
+    kind: Literal["chunk", "entity"]
+    id: str
     source: str
     snippet: str
 

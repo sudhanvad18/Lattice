@@ -139,25 +139,38 @@ async def answer_question(
 
     # Build numbered sources: chunks first, then entities
     sources: list[ChatCitation] = []
+    prompt_blocks: list[str] = []
 
     for chunk in chunks:
         metadata = getattr(chunk, "metadata", {}) or {}
         source = str(metadata.get("source", ""))
         content = str(getattr(chunk, "content", ""))
-        snippet = " ".join(content.split())[:200]
-        sources.append(ChatCitation(source=source, snippet=snippet))
+        index = len(sources) + 1
+        sources.append(ChatCitation(
+            index=index,
+            kind="chunk",
+            id=str(getattr(chunk, "chunk_id", "") or ""),
+            source=source,
+            snippet=" ".join(content.split())[:200],
+        ))
+        prompt_blocks.append(f"[{index}] Source: {source}\n{content.strip()}")
 
     for entity in entities:
         entity_id = str(getattr(entity, "id", "") or "")
         entity_name = str(getattr(entity, "name", "") or "")
-        snippet = entity_summaries.get(entity_id, entity_name)[:200]
-        sources.append(ChatCitation(source=entity_name, snippet=snippet))
+        entity_type = str(getattr(entity, "entity_type", "") or "")
+        description = str(getattr(entity, "description", "") or "").strip()
+        related = entity_summaries.get(entity_id, entity_name)
+        index = len(sources) + 1
+        sources.append(ChatCitation(
+            index=index, kind="entity", id=entity_id, source=entity_name, snippet=related[:200],
+        ))
+        detail = f"{entity_type}: {description}" if description else entity_type
+        prompt_blocks.append(
+            f"[{index}] Knowledge graph entity `{entity_name}` ({detail})\nRelated: {related}"
+        )
 
-    # Build prompt
-    sources_text = "\n\n".join(
-        f"[{i + 1}] Source: {s.source}\n{s.snippet}"
-        for i, s in enumerate(sources)
-    )
+    sources_text = "\n\n".join(prompt_blocks)
     system_content = (
         "Answer the user's question using only the numbered sources provided below. "
         "Cite each source inline as [n] where n is its number. "
@@ -199,7 +212,7 @@ async def answer_question(
 def _format_sources_text(sources: list[ChatCitation]) -> str:
     if not sources:
         return _EMPTY_ANSWER
-    parts = [f"[{i + 1}] {s.source}: {s.snippet}" for i, s in enumerate(sources)]
+    parts = [f"[{s.index}] {s.source}: {s.snippet}" for s in sources]
     return "Retrieved passages:\n\n" + "\n\n".join(parts)
 
 

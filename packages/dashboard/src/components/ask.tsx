@@ -30,7 +30,7 @@ interface ConversationMessage {
   content: string;
   citations?: ChatCitation[];
   chatMode?: string;
-  notice?: string;
+  notice?: string | null;
   agentRun?: AgentRun;
   timestamp: Date;
 }
@@ -53,7 +53,7 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const kbReady = kb?.ready ?? false;
-  const modelReachable = apiReachable && !!health && !health.provider.detail;
+  const modelReachable = apiReachable && !!health && !!health.provider?.reachable;
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -70,7 +70,7 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
           ...prev,
           {
             role: "assistant",
-            content: res.answer,
+            content: res.response,
             citations: res.citations,
             chatMode: res.mode,
             notice: res.notice,
@@ -224,7 +224,7 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
             onClick={() => setMode("agent")}
             disabled={!modelReachable}
             title={
-              !modelReachable ? (health?.provider.detail ?? "Model unavailable") : undefined
+              !modelReachable ? (health?.provider?.detail ?? "Model unavailable") : undefined
             }
           >
             <Users className="w-3.5 h-3.5" /> Agent team
@@ -403,6 +403,7 @@ function MessageBubble({ msg }: { msg: ConversationMessage }) {
   // Assistant: answer
   const citations = msg.citations ?? [];
   const chatMode = msg.chatMode;
+  const openCitation = citations.find((c) => c.index === expandedCitation);
 
   return (
     <div className="flex justify-start">
@@ -417,12 +418,12 @@ function MessageBubble({ msg }: { msg: ConversationMessage }) {
         <AnswerText content={msg.content} citations={citations}
           expandedCitation={expandedCitation} onToggle={setExpandedCitation} />
 
-        {expandedCitation !== null && citations[expandedCitation - 1] && (
+        {openCitation && (
           <div className="mt-2 p-3 bg-zinc-800 border border-zinc-700 rounded-lg text-xs">
             <p className="font-medium text-zinc-300 mb-1">
-              {citations[expandedCitation - 1].source}
+              [{openCitation.index}] {openCitation.source}
             </p>
-            <p className="text-zinc-400">{citations[expandedCitation - 1].snippet}</p>
+            <p className="text-zinc-400">{openCitation.snippet}</p>
           </div>
         )}
 
@@ -452,7 +453,7 @@ function AnswerText({
       {parts.map((part, i) => {
         if (i % 2 === 0) return part;
         const n = parseInt(part, 10);
-        if (!citations[n - 1]) return `[${part}]`;
+        if (!citations.some((c) => c.index === n)) return `[${part}]`;
         const isOpen = expandedCitation === n;
         return (
           <button
