@@ -154,12 +154,52 @@ def test_serve(invoke, monkeypatch, tmp_path):
 
 
 def test_eval_saves_results(invoke, tmp_path):
+    assert invoke("ingest", str(CORPUS)).exit_code == 0
     result = invoke("eval", "--provider", "mock", "--task", "doc-api")
     assert result.exit_code == 0, result.output
 
     saved = json.loads((tmp_path / "eval" / "latest.json").read_text())
     assert saved["provider"] == "mock"
     assert [r["task_id"] for r in saved["results"]] == ["doc-api"]
+
+
+def test_eval_rejects_empty_kb(invoke):
+    result = invoke("eval", "--provider", "mock")
+    assert result.exit_code == 1
+    assert "The knowledge base is empty. Run `lattice ingest <path>` first." in result.output
+
+
+def test_eval_defaults_to_kb_tasks(invoke, tmp_path):
+    assert invoke("ingest", str(CORPUS)).exit_code == 0
+    result = invoke("eval", "--provider", "mock", "--limit", "2")
+    assert result.exit_code == 0, result.output
+    saved = json.loads((tmp_path / "eval" / "latest.json").read_text())
+    assert len(saved["results"]) == 2
+    assert all(r["task_id"].startswith("kb-") for r in saved["results"])
+    assert saved["kb"]["chunks"] > 0
+    assert "avg_groundedness" in saved["summary"]
+
+
+def test_eval_probes_selected_provider(invoke, monkeypatch):
+    from lattice.config import InferenceProvider, get_settings
+    from lattice.inference.health import ProviderHealth
+
+    assert invoke("ingest", str(CORPUS)).exit_code == 0
+    settings = get_settings()
+    previous = (settings.default_provider, settings.openai_model)
+
+    async def unavailable():
+        probed = get_settings()
+        assert probed.default_provider == InferenceProvider.OPENAI
+        assert probed.openai_model == "selected-model"
+        return ProviderHealth("openai", "selected-model", False, "Configure the selected provider")
+
+    monkeypatch.setattr("lattice.inference.health.check_provider", unavailable)
+    result = invoke("eval", "--provider", "openai", "--model", "selected-model")
+    assert result.exit_code == 1
+    assert "Configure the selected provider" in result.output
+    restored = get_settings()
+    assert (restored.default_provider, restored.openai_model) == previous
 
 
 def test_eval_rejects_unknown_task(invoke):

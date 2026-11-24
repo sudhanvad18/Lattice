@@ -204,35 +204,100 @@ def run(ctx: click.Context, task: str, provider: str | None, model: str | None,
 
 
 @main.command("eval")
-@click.option("--provider", type=click.Choice(["ollama", "anthropic", "openai", "mock"]),
-              help="LLM provider; 'mock' runs offline to exercise the pipeline.")
+@click.option(
+    "--provider",
+    type=click.Choice(["ollama", "anthropic", "openai", "mock"]),
+    help="LLM provider; 'mock' runs offline to exercise the pipeline.",
+)
 @click.option("--model", help="Override the provider's default model.")
-@click.option("--task", "task_ids", multiple=True, help="Run only these benchmark task ids.")
+@click.option("--task", "task_ids", multiple=True, help="Run these demo benchmark task ids.")
+@click.option("--demo", is_flag=True, help="Run all demo benchmark tasks.")
+@click.option("--limit", default=5, type=click.IntRange(1, 10), show_default=True)
 @click.pass_context
-def eval_command(ctx: click.Context, provider: str | None, model: str | None,
-                 task_ids: tuple[str, ...]) -> None:
-    """Run the built-in benchmark and save results for the dashboard."""
-    tasks = [t for t in DEMO_BENCHMARK_TASKS if not task_ids or t.id in task_ids]
-    if not tasks:
-        raise click.BadParameter(f"unknown task id(s): {', '.join(task_ids)}", param_hint="--task")
+def eval_command(
+    ctx: click.Context,
+    provider: str | None,
+    model: str | None,
+    task_ids: tuple[str, ...],
+    demo: bool,
+    limit: int,
+) -> None:
+    """Benchmark the active knowledge base and save results for the dashboard."""
+    import os
 
+    from lattice.evaluation import generate_kb_tasks
+    from lattice.inference.health import check_provider
+
+    unknown = set(task_ids) - {t.id for t in DEMO_BENCHMARK_TASKS}
+    if unknown:
+        raise click.BadParameter(
+            f"unknown task id(s): {', '.join(sorted(unknown))}",
+            param_hint="--task",
+        )
+    kb = _kb(ctx)
+    if kb.is_empty:
+        raise click.ClickException(
+            "The knowledge base is empty. Run `lattice ingest <path>` first."
+        )
+    tasks = (
+        [t for t in DEMO_BENCHMARK_TASKS if demo or t.id in task_ids]
+        if demo or task_ids
+        else generate_kb_tasks(kb, limit=limit)
+    )
     if provider == "mock":
         llm = MockProvider()
     else:
+        selected_provider = provider or get_settings().default_provider.value
+        overrides = {"LATTICE_DEFAULT_PROVIDER": selected_provider}
+        if model:
+            overrides[f"LATTICE_{selected_provider.upper()}_MODEL"] = model
+        previous = {key: os.environ.get(key) for key in overrides}
+        try:
+            os.environ.update(overrides)
+            health = asyncio.run(check_provider())
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        if not health.reachable:
+            raise click.ClickException(health.detail or "The model is unavailable.")
         llm = get_provider(
             InferenceProvider(provider) if provider else None,
             **({"model": model} if model else {}),
         )
-    report = asyncio.run(EvaluationEngine(llm).run_benchmark(tasks))
-
+    snapshot = {
+        "chunks": kb.stats["chunks_stored"],
+        "entities": kb.stats["kg_entities"],
+        "sources": len(kb.source_counts()),
+    }
+    report = asyncio.run(EvaluationEngine(llm, knowledge_base=kb).run_benchmark(tasks))
     path = Path(ctx.obj["data_dir"]) / "eval" / "latest.json"
-    save_report(report, path, provider=provider or get_settings().default_provider.value,
-                model=model or getattr(llm, "model", None))
-    _table("Benchmark", ("Task", "Status", "Passed", "Quality", "Keyword recall", "Latency"), [
-        (r.task_id, r.status, "yes" if r.passed else "no", f"{r.review_confidence:.2f}",
-         f"{r.keyword_recall:.0%}", f"{r.elapsed_seconds:.1f}s")
-        for r in report.results
-    ])
+    save_report(
+        report,
+        path,
+        kb_snapshot=snapshot,
+        provider=provider or get_settings().default_provider.value,
+        model=model or getattr(llm, "model", None),
+    )
+    columns = ("Task", "Status", "Passed", "Quality", "Keyword recall", "Groundedness", "Latency")
+    _table(
+        "Benchmark",
+        columns,
+        [
+            (
+                r.task_id,
+                r.status,
+                "yes" if r.passed else "no",
+                f"{r.review_confidence:.2f}",
+                f"{r.keyword_recall:.0%}",
+                f"{r.groundedness:.0%}",
+                f"{r.elapsed_seconds:.1f}s",
+            )
+            for r in report.results
+        ],
+    )
     console.print(f"Pass rate {report.pass_rate:.0%}. Results saved to {path}")
 
 
