@@ -30,12 +30,16 @@ from fastapi import Depends, FastAPI, HTTPException, Header, WebSocket, WebSocke
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
+from lattice.config import get_settings
+from lattice.inference.health import check_provider
 from lattice_api.audit import AuditTrail
 from lattice_api.chat import build_chat_answer
+from lattice_api.errors import require_kb, require_provider
 from lattice_api.eval_routes import router as eval_router
 from lattice_api.graph_routes import KnowledgeBaseDependency
 from lattice_api.graph_routes import get_knowledge_base as get_knowledge_base
 from lattice_api.graph_routes import router
+from lattice_api.kb_routes import router as kb_router
 from lattice_api.models import (
     ArtifactResponse,
     ChatRequest,
@@ -151,12 +155,16 @@ def create_app(
             kb = KnowledgeBase(persist_dir=get_settings().data_dir)
         app.state.knowledge_base = kb
         manager = task_manager or TaskManager(knowledge_base=kb)
+        app.state.task_manager = manager
         _task_manager = manager
         _audit_trail = manager.audit_trail
         logger.info("lattice_api_started")
         try:
             yield
         finally:
+            job = getattr(app.state, "kb_ingest_job", None)
+            if job is not None:
+                await asyncio.shield(job)
             if knowledge_base is None:
                 kb.close()
                 app.state.knowledge_base = None
@@ -170,6 +178,8 @@ def create_app(
     )
 
     app.state.knowledge_base = knowledge_base
+    app.state.task_manager = task_manager
+    app.include_router(kb_router)
     app.include_router(router)
     app.include_router(eval_router)
 
@@ -214,7 +224,8 @@ def create_app(
             status="healthy",
             version="0.1.0",
             agents_available=["orchestrator", "researcher", "writer", "reviewer", "code", "ingestion"],
-            providers_configured=["ollama"],
+            providers_configured=[get_settings().default_provider.value],
+            provider=(await check_provider()).to_dict(),
         )
 
     # --- Task Endpoints ---
@@ -222,6 +233,8 @@ def create_app(
     @app.post("/tasks", response_model=TaskStatusResponse)
     async def submit_task(request: TaskSubmitRequest):
         """Submit a new task to the agent team."""
+        require_kb(app.state.knowledge_base)
+        await require_provider()
         tm = get_task_manager()
         state = await tm.submit_task(
             task=request.task,

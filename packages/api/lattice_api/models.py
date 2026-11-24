@@ -79,6 +79,7 @@ class HealthResponse(BaseModel):
     agents_available: list[str] = Field(default_factory=list)
     providers_configured: list[str] = Field(default_factory=list)
     knowledge_base: KnowledgeBaseHealth | None = None
+    provider: ProviderStatus | None = None
 
 
 class WebSocketMessage(BaseModel):
@@ -215,3 +216,40 @@ class EvalRunResponse(BaseModel):
     model: str | None = None
     summary: EvalSummary | None = None
     results: list[EvalTaskResult] = Field(default_factory=list)
+
+
+class ProviderStatus(BaseModel):
+    name: str
+    model: str
+    reachable: bool
+    detail: str | None = None
+
+
+class KBSource(BaseModel):
+    source: str
+    chunks: int
+
+
+class KBStatus(BaseModel):
+    ready: bool
+    chunks: int
+    entities: int
+    relations: int
+    communities: int
+    sources: list[KBSource]
+    last_ingested_at: str | None
+    ingesting: bool
+    data_dir: str
+
+
+class KBIngestRequest(BaseModel):
+    path: str = Field(min_length=1)
+    reset: bool = False
+
+
+class KBIngestAccepted(BaseModel):
+    job_id: str
+    path: str
+
+
+HealthResponse.model_rebuild()

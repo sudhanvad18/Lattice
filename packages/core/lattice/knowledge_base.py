@@ -19,6 +19,9 @@ Usage:
 
 from __future__ import annotations
 
+import json
+import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
@@ -52,6 +55,7 @@ class KnowledgeBase:
     ) -> None:
         persist_path = Path(persist_dir)
         self._persist_path = persist_path
+        self._lock = threading.RLock()
 
         cache = IngestionCache(persist_path / "ingestion_cache") if enable_cache else None
         self._pipeline = IngestionPipeline(chunk_config=chunk_config, cache=cache)
@@ -80,16 +84,18 @@ class KnowledgeBase:
 
     def reset(self) -> None:
         """Clear persisted chunks, graph, and ingestion cache."""
-        self._vector_store.reset()
-        if isinstance(self.graph, NetworkXBackend):
-            self._kg_builder.backend = NetworkXBackend()
-        elif hasattr(self.graph, "clear"):
-            self.graph.clear()
-        IngestionCache(self._persist_path / "ingestion_cache").clear()
-        if self._pipeline._cache is not None:
-            self._pipeline._cache.clear()
-        self._chunks.clear()
-        (self._persist_path / "graph.json").unlink(missing_ok=True)
+        with self._lock:
+            self._vector_store.reset()
+            if isinstance(self.graph, NetworkXBackend):
+                self._kg_builder.backend = NetworkXBackend()
+            elif hasattr(self.graph, "clear"):
+                self.graph.clear()
+            IngestionCache(self._persist_path / "ingestion_cache").clear()
+            if self._pipeline._cache is not None:
+                self._pipeline._cache.clear()
+            self._chunks.clear()
+            (self._persist_path / "graph.json").unlink(missing_ok=True)
+            (self._persist_path / "kb_meta.json").unlink(missing_ok=True)
 
     @property
     def vector_store(self) -> VectorStore:
@@ -99,22 +105,25 @@ class KnowledgeBase:
     @property
     def stats(self) -> dict:
         """Summary statistics."""
-        kg_stats = self._kg_builder.stats
-        return {
-            "chunks_stored": self._vector_store.count,
-            "kg_entities": kg_stats.total_entities,
-            "kg_relations": kg_stats.total_relations,
-            "kg_entity_types": kg_stats.entity_types,
-            "kg_relation_types": kg_stats.relation_types,
-        }
+        with self._lock:
+            kg_stats = self._kg_builder.stats
+            return {
+                "chunks_stored": self._vector_store.count,
+                "kg_entities": kg_stats.total_entities,
+                "kg_relations": kg_stats.total_relations,
+                "kg_entity_types": kg_stats.entity_types,
+                "kg_relation_types": kg_stats.relation_types,
+            }
 
     @property
     def is_empty(self) -> bool:
-        return self._vector_store.count == 0
+        with self._lock:
+            return self._vector_store.count == 0
 
     def source_counts(self) -> dict[str, int]:
         """Chunks stored per source path, sorted by path."""
-        return self._vector_store.source_counts()
+        with self._lock:
+            return self._vector_store.source_counts()
 
     def ingest_file(self, path: Path) -> int:
         """Ingest a single file into both vector store and KG.
@@ -136,11 +145,13 @@ class KnowledgeBase:
 
     def vector_search(self, query: str, top_k: int = 5) -> list[SearchResult]:
         """Semantic similarity search over document chunks."""
-        return self._vector_store.search(query, top_k=top_k)
+        with self._lock:
+            return self._vector_store.search(query, top_k=top_k)
 
     def graph_search(self, query: str, entity_type: str | None = None) -> list[Entity]:
         """Search the knowledge graph for entities matching the query."""
-        return self.graph.search_entities(query, entity_type=entity_type)
+        with self._lock:
+            return self.graph.search_entities(query, entity_type=entity_type)
 
     def get_entity_context(self, entity_id: str, depth: int = 1) -> KGQueryResult:
         """Get the subgraph around an entity (for context enrichment)."""
@@ -158,33 +169,56 @@ class KnowledgeBase:
 
     def _store_chunks(self, chunks: list[Chunk]) -> int:
         """Store chunks in both vector store and KG."""
-        if not chunks:
-            return 0
+        with self._lock:
+            if not chunks:
+                return 0
 
-        # Add to vector store for similarity search
-        self._vector_store.add_chunks(chunks)
+            # Add to vector store for similarity search
+            self._vector_store.add_chunks(chunks)
 
-        # Extract entities/relations and add to KG
-        self._kg_builder.build_from_chunks(chunks)
+            # Extract entities/relations and add to KG
+            self._kg_builder.build_from_chunks(chunks)
 
-        # Update community clusters
-        try:
-            from lattice.graph.clustering import cluster_graph
-            cluster_graph(self._kg_builder.backend)
-        except ImportError:
-            pass
-        except Exception as e:
-            logger.debug("clustering_skipped", reason=str(e))
+            # Update community clusters
+            try:
+                from lattice.graph.clustering import cluster_graph
+                cluster_graph(self._kg_builder.backend)
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.debug("clustering_skipped", reason=str(e))
 
-        if isinstance(self.graph, NetworkXBackend):
-            self.graph.save(self._persist_path / "graph.json")
+            if isinstance(self.graph, NetworkXBackend):
+                self.graph.save(self._persist_path / "graph.json")
 
-        self._chunks.extend(chunks)
+            self._chunks.extend(chunks)
 
-        logger.info(
-            "knowledge_base_updated",
-            new_chunks=len(chunks),
-            total_chunks=self._vector_store.count,
-            **self._kg_builder.stats.model_dump(),
-        )
-        return len(chunks)
+            logger.info(
+                "knowledge_base_updated",
+                new_chunks=len(chunks),
+                total_chunks=self._vector_store.count,
+                **self._kg_builder.stats.model_dump(),
+            )
+            meta_path = self._persist_path / "kb_meta.json"
+            temporary = meta_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps({"last_ingested_at": datetime.now(UTC).isoformat()}))
+            temporary.replace(meta_path)
+            return len(chunks)
+
+    @property
+    def last_ingested_at(self) -> str | None:
+        """Persisted timestamp of the most recent successful ingestion."""
+        with self._lock:
+            try:
+                metadata = json.loads((self._persist_path / "kb_meta.json").read_text())
+                return metadata["last_ingested_at"]
+            except (OSError, ValueError, KeyError, TypeError):
+                return None
+
+    @property
+    def community_count(self) -> int:
+        with self._lock:
+            return len({
+                entity.community for entity in self.graph.get_all_entities()
+                if entity.community is not None
+            })

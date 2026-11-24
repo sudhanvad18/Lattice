@@ -8,7 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lattice.agents.state import AgentState, TaskStatus
+from lattice.inference.health import ProviderHealth
 from lattice.inference.mock import MockProvider
+from lattice.knowledge_base import KnowledgeBase
 from lattice_api.app import create_app
 from lattice_api.audit import AuditTrail
 from lattice_api.task_manager import TaskManager
@@ -39,8 +41,15 @@ def task_manager(mock_provider):
 
 
 @pytest.fixture
-def client(task_manager):
-    app = create_app(task_manager=task_manager)
+def client(task_manager, tmp_path, monkeypatch):
+    async def reachable():
+        return ProviderHealth("ollama", "test", True)
+
+    monkeypatch.setattr("lattice_api.errors.check_provider", reachable)
+    monkeypatch.setattr("lattice_api.app.check_provider", reachable)
+    kb = KnowledgeBase(tmp_path)
+    kb.ingest_text("API documentation describes the service." * 30)
+    app = create_app(task_manager=task_manager, knowledge_base=kb)
     return TestClient(app)
 
 

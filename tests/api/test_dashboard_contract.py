@@ -7,7 +7,9 @@ from starlette.websockets import WebSocketDisconnect
 
 from lattice.graph.engine import NetworkXBackend
 from lattice.graph.models import Entity
+from lattice.inference.health import ProviderHealth
 from lattice.inference.mock import MockProvider
+from lattice.knowledge_base import KnowledgeBase
 from lattice.retrieval.vector_store import SearchResult
 from lattice_api.app import _stream_task_events, create_app
 from lattice_api.chat import build_chat_answer
@@ -149,9 +151,15 @@ def test_chat_rejects_blank_message():
     assert client.post("/chat", json={}).status_code == 422
 
 
-def test_activity_socket_replays_real_task_ids():
+def test_activity_socket_replays_real_task_ids(tmp_path, monkeypatch):
+    async def reachable():
+        return ProviderHealth("ollama", "test", True)
+
+    monkeypatch.setattr("lattice_api.errors.check_provider", reachable)
+    kb = KnowledgeBase(tmp_path)
+    kb.ingest_text("API documentation describes the service." * 30)
     manager = _manager()
-    client = TestClient(create_app(task_manager=manager, knowledge_base=_EmptyKB()))
+    client = TestClient(create_app(task_manager=manager, knowledge_base=kb))
     first = client.post("/tasks", json={"task": "First task"}).json()["task_id"]
     second = client.post("/tasks", json={"task": "Second task"}).json()["task_id"]
     expected = [
@@ -169,9 +177,15 @@ def test_activity_socket_replays_real_task_ids():
     assert created[0]["timestamp"]
 
 
-def test_task_socket_replays_only_that_task_then_closes():
+def test_task_socket_replays_only_that_task_then_closes(tmp_path, monkeypatch):
+    async def reachable():
+        return ProviderHealth("ollama", "test", True)
+
+    monkeypatch.setattr("lattice_api.errors.check_provider", reachable)
+    kb = KnowledgeBase(tmp_path)
+    kb.ingest_text("API documentation describes the service." * 30)
     manager = _manager()
-    client = TestClient(create_app(task_manager=manager, knowledge_base=_EmptyKB()))
+    client = TestClient(create_app(task_manager=manager, knowledge_base=kb))
     task_id = client.post("/tasks", json={"task": "Document the API"}).json()["task_id"]
     client.post("/tasks", json={"task": "Other task"})
     manager._emit_event(task_id, "task_complete", {"status": "completed", "artifacts": 1})

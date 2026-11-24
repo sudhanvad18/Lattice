@@ -23,6 +23,7 @@ from lattice.agents.reviewer import ReviewerAgent
 from lattice.agents.state import AgentState, TaskStatus
 from lattice.agents.writer import WriterAgent
 from lattice.comms.checkpoint import CheckpointStore, LocalCheckpointStore
+from lattice.inference.health import friendly_provider_error
 from lattice.inference.provider import LLMProvider, get_provider
 from lattice.writeback import ApprovalGate, ApprovalMode, WriteBackEngine
 
@@ -77,6 +78,10 @@ class TaskManager:
     def recent_events(self) -> list[dict[str, Any]]:
         """Events emitted so far, oldest first. Safe to iterate while new events arrive."""
         return list(self._event_log)
+
+    def emit(self, task_id: str, event: str, data: dict[str, Any]) -> None:
+        """Publish an event to the shared activity bus."""
+        self._emit_event(task_id, event, data)
 
     def _emit_event(self, task_id: str, event: str, data: dict[str, Any]) -> None:
         record = {
@@ -160,6 +165,24 @@ class TaskManager:
             # task_id. The id returned by POST /tasks is the one clients poll.
             result.task_id = task_id
             self._tasks[task_id] = result
+            if result.status == TaskStatus.FAILED:
+                import httpx
+
+                result.errors = [
+                    (friendly_provider_error(httpx.ConnectError(error)) or error)
+                    if any(text in error.lower() for text in (
+                        "connection attempts failed", "connection refused",
+                    )) else error
+                    for error in result.errors
+                ]
+                message = "; ".join(result.errors) or "Task failed"
+                self._audit.record(
+                    task_id=task_id,
+                    event_type=AuditEventType.ERROR,
+                    summary=f"Task failed: {message}",
+                )
+                self._emit_event(task_id, "error", {"message": message})
+                return
 
             self._audit.record(
                 task_id=task_id,
@@ -179,17 +202,18 @@ class TaskManager:
 
         except Exception as e:
             logger.error("task_execution_failed", task_id=task_id, error=str(e))
+            message = friendly_provider_error(e) or str(e)
             state.status = TaskStatus.FAILED
-            state.errors.append(str(e))
+            state.errors.append(message)
             self._tasks[task_id] = state
 
             self._audit.record(
                 task_id=task_id,
                 event_type=AuditEventType.ERROR,
-                summary=f"Task failed: {e}",
+                summary=f"Task failed: {message}",
             )
 
-            self._emit_event(task_id, "error", {"message": str(e)})
+            self._emit_event(task_id, "error", {"message": message})
 
         finally:
             self._running.pop(task_id, None)
