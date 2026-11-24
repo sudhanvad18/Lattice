@@ -74,7 +74,9 @@ Use the returned `task_id` with:
 | `GET /tasks/{task_id}` | Status and artifact/review counts. |
 | `GET /tasks/{task_id}/result` | Artifacts, review history, and audit trail. |
 | `GET /tasks/{task_id}/audit` | Recorded audit events. |
-| `WS /ws/{task_id}` | Task event stream. |
+| `POST /chat` | JSON body `{message}`. Returns retrieved passages and matching graph entities, plus citation ids. Does not call a model. HTTP 503 when retrieval fails. |
+| `WS /ws/activity` | Event stream for every task. Replays recent events, then broadcasts new ones. |
+| `WS /ws/{task_id}` | Event stream for one task. Replays that task's events and closes after completion or failure. |
 | `GET /kg/graph` | Graph nodes and edges. `limit` defaults to 500. |
 | `GET /kg/stats` | Chunk, entity, and relation counts, plus the backend name. |
 | `GET /kg/entities` | Entities, optionally filtered by `q`, `entity_type`, and `limit`. |
@@ -116,12 +118,15 @@ Open `http://localhost:3000`. `npm run build` builds the dashboard and `npm star
 
 ## Integration status
 
-The dashboard is a UI prototype. These contracts need alignment before presenting a complete dashboard-to-agent workflow:
+Dashboard task submission, history, the activity stream, and chat call the API:
 
-- Task submission sends `goal`, while the API requires `task`.
-- The dashboard expects `id`/`goal`; the API returns `task_id`/`original_task`.
-- Dashboard WebSocket paths differ from the API's `WS /ws/{task_id}` route.
-- The dashboard chat request targets `POST /chat`, which the API does not provide. Graph (`/kg/*`) and evaluation (`/eval/results`) endpoints exist.
+- Submit Task posts `{task, approval_mode}` to `POST /tasks` and reads `task_id` and `original_task`. History loads artifacts from `GET /tasks/{task_id}/result`.
+- The activity feed opens `WS /ws/activity`. Task progress opens `WS /ws/{task_id}`.
+- Chat posts `{message}` to `POST /chat`. The response is retrieved passages and graph entities, with chunk and entity ids as citations. It does not call a language model. An empty knowledge base returns a no-match message and an empty citation list. Retrieval failure is HTTP 503.
+- Sample tasks appear only when the API cannot be reached. An HTTP error from the API shows an empty list.
+
+These boundaries remain:
+
 - Write-back handlers and approval gates exist as library components; the API task manager does not execute them automatically.
 - API and MCP images install the project from the root `pyproject.toml`. Both copy `packages/core`, `packages/api`, and `packages/mcp`, because that manifest builds `lattice`, `lattice_api`, and `lattice_mcp` into one wheel. The MCP image pins `mcp==1.30.0`, the last 1.x release the current server starts with. Porting `lattice_mcp.server` to mcp 2.x is open work. The server is a stdio process, and the image still publishes port 8100. Helm charts and the dashboard image are unchanged and are not a deployment recipe.
 
