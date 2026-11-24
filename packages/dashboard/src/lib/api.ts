@@ -1,5 +1,37 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// --- Errors ---
+
+export class ApiError extends Error {
+  code?: string;
+  constructor(public status: number, path: string, message?: string, code?: string) {
+    super(message ?? `Request to ${path} failed (${status})`);
+    this.code = code;
+  }
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...options });
+  if (!res.ok) {
+    let code: string | undefined;
+    let message: string | undefined;
+    try {
+      const body = await res.json() as unknown;
+      if (body && typeof body === "object" && "detail" in body) {
+        const detail = (body as Record<string, unknown>).detail;
+        if (detail && typeof detail === "object" && "code" in detail && "message" in detail) {
+          code = String((detail as Record<string, unknown>).code);
+          message = String((detail as Record<string, unknown>).message);
+        }
+      }
+    } catch { /* ignore parse errors */ }
+    throw new ApiError(res.status, path, message, code);
+  }
+  return res.json() as Promise<T>;
+}
+
+// --- Task types ---
+
 export interface Task {
   task_id: string;
   original_task: string;
@@ -41,6 +73,8 @@ export interface AgentEvent {
   task_id: string;
 }
 
+// --- Eval types ---
+
 export interface EvalResult {
   task_id: string;
   task_name: string;
@@ -54,6 +88,8 @@ export interface EvalResult {
   iterations: number;
   artifact_count: number;
   errors: string[];
+  groundedness: number;
+  category?: string;
 }
 
 export interface EvalSummary {
@@ -64,6 +100,7 @@ export interface EvalSummary {
   avg_latency_seconds: number;
   avg_keyword_recall: number;
   avg_review_confidence: number;
+  avg_groundedness?: number;
 }
 
 export interface EvalRun {
@@ -72,19 +109,61 @@ export interface EvalRun {
   model: string | null;
   summary: EvalSummary | null;
   results: EvalResult[];
+  kb?: { chunks: number; entities: number };
 }
 
-export class ApiError extends Error {
-  constructor(public status: number, path: string) {
-    super(`Request to ${path} failed (${status})`);
-  }
+export interface EvalStatus {
+  running: boolean;
+  completed: number;
+  total: number;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...options });
-  if (!res.ok) throw new ApiError(res.status, path);
-  return res.json();
+// --- Health types ---
+
+export interface HealthProvider {
+  name: string;
+  model: string;
+  /** Absent when reachable; present with an explanation when not. */
+  detail?: string;
 }
+
+export interface HealthResponse {
+  status: string;
+  provider: HealthProvider;
+}
+
+// --- Knowledge base types ---
+
+export interface KBSource {
+  path: string;
+  chunks: number;
+}
+
+export interface KBStatus {
+  ready: boolean;
+  chunks: number;
+  entities: number;
+  relations: number;
+  communities: number;
+  last_ingested: string | null;
+  sources: KBSource[];
+}
+
+// --- Chat types ---
+
+export interface ChatCitation {
+  source: string;
+  snippet: string;
+}
+
+export interface ChatResponse {
+  answer: string;
+  citations: ChatCitation[];
+  mode: string;
+  notice?: string;
+}
+
+// --- Graph types ---
 
 export interface KGNode {
   id: string;
@@ -101,34 +180,6 @@ export interface KGEdge {
   target: string;
   relation_type: string;
   provenance?: string;
-}
-
-export function submitTask(task: string, approvalMode: string = "on_low_confidence"): Promise<Task> {
-  return request("/tasks", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task, approval_mode: approvalMode }),
-  });
-}
-
-export function getTasks(): Promise<Task[]> {
-  return request("/tasks");
-}
-
-export function getTask(id: string): Promise<Task> {
-  return request(`/tasks/${id}`);
-}
-
-export function getTaskResult(id: string): Promise<TaskResult> {
-  return request(`/tasks/${id}/result`);
-}
-
-export function getAuditTrail(taskId: string): Promise<AgentEvent[]> {
-  return request(`/tasks/${taskId}/audit`);
-}
-
-export function getEvalResults(): Promise<EvalRun> {
-  return request("/eval/results");
 }
 
 export interface KnowledgeGraph {
@@ -158,6 +209,87 @@ export interface Communities {
   surprising_connections: { source: string; target: string; explanation: string }[];
 }
 
+// --- Task fetchers ---
+
+export function submitTask(task: string, approvalMode: string = "on_low_confidence"): Promise<Task> {
+  return request("/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task, approval_mode: approvalMode }),
+  });
+}
+
+export function getTasks(): Promise<Task[]> {
+  return request("/tasks");
+}
+
+export function getTask(id: string): Promise<Task> {
+  return request(`/tasks/${id}`);
+}
+
+export function getTaskResult(id: string): Promise<TaskResult> {
+  return request(`/tasks/${id}/result`);
+}
+
+export function getAuditTrail(taskId: string): Promise<AgentEvent[]> {
+  return request(`/tasks/${taskId}/audit`);
+}
+
+// --- Health / KB fetchers ---
+
+export function getHealth(): Promise<HealthResponse> {
+  return request("/health");
+}
+
+export function getKBStatus(): Promise<KBStatus> {
+  return request("/kb/status");
+}
+
+export function ingestPath(path: string, reset: boolean): Promise<void> {
+  return request("/kb/ingest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, reset }),
+  });
+}
+
+export function resetKB(): Promise<void> {
+  return request("/kb/reset", { method: "POST" });
+}
+
+// --- Eval fetchers ---
+
+export function getEvalResults(): Promise<EvalRun> {
+  return request("/eval/results");
+}
+
+export function getEvalStatus(): Promise<EvalStatus> {
+  return request("/eval/status");
+}
+
+export function runEval(limit?: number): Promise<void> {
+  return request("/eval/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(limit !== undefined ? { limit } : {}),
+  });
+}
+
+// --- Chat fetcher ---
+
+export function chatQuery(
+  message: string,
+  history: { role: string; content: string }[] = [],
+): Promise<ChatResponse> {
+  return request("/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, history }),
+  });
+}
+
+// --- Graph fetchers ---
+
 function graphRequest<T>(path: string, options?: RequestInit): Promise<T> {
   return request(`/kg/${path}`, options);
 }
@@ -178,7 +310,10 @@ export function getCommunities(): Promise<Communities> {
   return graphRequest("communities");
 }
 
-export function ingestText(text: string, source = "api"): Promise<{ chunks: number; stats: Omit<GraphStats, "backend"> }> {
+export function ingestText(
+  text: string,
+  source = "api",
+): Promise<{ chunks: number; stats: Omit<GraphStats, "backend"> }> {
   return graphRequest("ingest", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -186,13 +321,7 @@ export function ingestText(text: string, source = "api"): Promise<{ chunks: numb
   });
 }
 
-export function chatQuery(message: string): Promise<{ response: string; citations: string[] }> {
-  return request("/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
-  });
-}
+// --- WebSocket helpers ---
 
 export function createWebSocket(taskId?: string): WebSocket {
   const wsBase = API_BASE.startsWith("https://")
@@ -210,10 +339,10 @@ export function normalizeAgentEvent(raw: unknown, fallbackTaskId = ""): AgentEve
   if (msg.event === "ping") return null;
 
   if (typeof msg.event === "string") {
-    const data = msg.data && typeof msg.data === "object"
-      ? msg.data as Record<string, unknown>
-      : {};
-    const taskId = typeof msg.task_id === "string" && msg.task_id ? msg.task_id : fallbackTaskId;
+    const data =
+      msg.data && typeof msg.data === "object" ? (msg.data as Record<string, unknown>) : {};
+    const taskId =
+      typeof msg.task_id === "string" && msg.task_id ? msg.task_id : fallbackTaskId;
     return {
       timestamp: typeof msg.timestamp === "string" ? msg.timestamp : new Date().toISOString(),
       agent: typeof data.agent === "string" && data.agent ? data.agent : "system",
@@ -236,17 +365,54 @@ export function normalizeAgentEvent(raw: unknown, fallbackTaskId = ""): AgentEve
 }
 
 function mapEventType(event: string): AgentEvent["event_type"] {
-  if (event === "error" || event.endsWith("_failed") || event.endsWith("_rejected")) return "error";
+  if (
+    event === "error" ||
+    event.endsWith("_failed") ||
+    event.endsWith("_rejected") ||
+    event.endsWith("_error")
+  )
+    return "error";
   if (event === "llm_call") return "llm_call";
   if (event === "tool_call") return "tool_call";
-  if (event === "task_complete" || event === "task_completed" || event === "agent_completed") {
+  if (
+    event === "task_complete" ||
+    event === "task_completed" ||
+    event === "agent_completed" ||
+    event.endsWith("_complete") ||
+    event.endsWith("_completed")
+  )
     return "completed";
-  }
   return "started";
 }
 
 function describeEvent(event: string, data: Record<string, unknown>): string {
   if (typeof data.summary === "string" && data.summary) return data.summary;
+
+  // KB ingest events
+  if (event === "kb_ingest_start") return "Knowledge base ingestion started";
+  if (event === "kb_ingest_complete") return "Knowledge base ingestion complete";
+  if (event === "kb_ingest_error")
+    return typeof data.message === "string" && data.message
+      ? `Ingestion failed: ${data.message}`
+      : "Knowledge base ingestion failed";
+  if (event === "kb_ingest_progress")
+    return typeof data.message === "string" && data.message ? data.message : "Ingesting...";
+
+  // Eval events
+  if (event === "eval_start") return "Evaluation benchmark started";
+  if (event === "eval_complete") return "Evaluation benchmark complete";
+  if (event === "eval_error")
+    return typeof data.message === "string" && data.message
+      ? `Benchmark failed: ${data.message}`
+      : "Evaluation benchmark failed";
+  if (event === "eval_progress") {
+    const completed =
+      typeof data.completed === "number" ? data.completed : null;
+    const total = typeof data.total === "number" ? data.total : null;
+    if (completed !== null && total !== null) return `Benchmark: ${completed}/${total} tasks`;
+    return typeof data.message === "string" && data.message ? data.message : "Running benchmark...";
+  }
+
   if (typeof data.message === "string" && data.message) return data.message;
   if (typeof data.task === "string" && data.task) return data.task;
   if (event === "task_complete" || event === "task_completed") {
@@ -254,5 +420,9 @@ function describeEvent(event: string, data: Record<string, unknown>): string {
     const artifacts = typeof data.artifacts === "number" ? data.artifacts : 0;
     return `Task ${status} (${artifacts} artifacts)`;
   }
+
+  // Show error data.message for error events
+  if (event === "error" && typeof data.message === "string" && data.message) return data.message;
+
   return event.replace(/_/g, " ");
 }
