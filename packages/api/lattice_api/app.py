@@ -100,8 +100,11 @@ async def _stream_task_events(websocket: WebSocket, task_id: str | None) -> None
                 await websocket.close()
                 return
         while True:
+            # asyncio.timeout, not wait_for: on 3.11 wait_for can swallow a cancellation that
+            # races with a queued event, leaving the stream looping after it was cancelled.
             try:
-                record = await asyncio.wait_for(queue.get(), timeout=30.0)
+                async with asyncio.timeout(30.0):
+                    record = await queue.get()
             except TimeoutError:
                 await websocket.send_json({
                     "event": "ping",
