@@ -216,3 +216,55 @@ async def test_cloud_provider_streams_and_closes_resources():
     assert [text async for text in openai.stream(messages)] == ["First ", "second"]
     openai_stream.close.assert_awaited_once()
     assert create.call_args.kwargs["stream"] is True
+
+
+@pytest.mark.parametrize("ending", ["complete", "disconnect", "cancel"])
+async def test_ollama_generate_streams_counts_usage_and_closes(monkeypatch, ending):
+    import asyncio
+    import json
+
+    import httpx
+
+    started = asyncio.Event()
+
+    class Body(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield b'{"message":{"content":"First "}}\n'
+            started.set()
+            if ending == "cancel":
+                await asyncio.Event().wait()
+            if ending == "complete":
+                yield (b'{"message":{"content":"last"},"done":true,'
+                       b'"eval_count":2,"prompt_eval_count":4}\n')
+
+        async def aclose(self):
+            self.closed = True
+
+    body = Body()
+
+    def handle(request):
+        assert json.loads(request.content)["stream"] is True
+        assert 0 < request.extensions["timeout"]["read"] <= 120
+        return httpx.Response(200, stream=body)
+
+    # Preserve the provider's configured timeout on the mock transport.
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original_client(
+        transport=httpx.MockTransport(handle), **kw,
+    ))
+    task = asyncio.create_task(OllamaProvider(model="local").generate([Message("user", "hi")]))
+    await asyncio.wait_for(started.wait(), 1)
+    if ending == "cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif ending == "disconnect":
+        with pytest.raises(RuntimeError, match="interrupted"):
+            await task
+    else:
+        result = await task
+        assert (result.content, result.provider, result.model) == ("First last", "ollama", "local")
+        assert result.usage == {"prompt_tokens": 4, "completion_tokens": 2}
+    assert body.closed

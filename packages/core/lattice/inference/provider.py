@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
@@ -101,9 +102,9 @@ class OllamaProvider(LLMProvider):
         self._base_url = base_url
         self._model = model
 
-    async def stream(
+    async def _frames(
         self, messages: list[Message], config: GenerationConfig | None = None,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[dict]:
         import json
 
         import httpx
@@ -118,7 +119,7 @@ class OllamaProvider(LLMProvider):
             "stream": True, "options": options,
         }
         async with (
-            httpx.AsyncClient(timeout=120.0) as client,
+            httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client,
             client.stream("POST", f"{self._base_url}/api/chat", json=payload) as response,
         ):
             response.raise_for_status()
@@ -128,39 +129,29 @@ class OllamaProvider(LLMProvider):
                 data = json.loads(line)
                 if data.get("error"):
                     raise RuntimeError("Ollama could not finish generating the answer.")
-                text = data.get("message", {}).get("content", "")
-                if text:
-                    yield text
-                if data.get("done"):
+                yield data
+                if data.get("done") is True:
                     return
             raise RuntimeError("Ollama's response was interrupted.")
 
+    async def stream(
+        self, messages: list[Message], config: GenerationConfig | None = None,
+    ) -> AsyncIterator[str]:
+        async with aclosing(self._frames(messages, config)) as frames:
+            async for frame in frames:
+                content = frame.get("message", {}).get("content", "")
+                if content:
+                    yield content
+
     async def generate(
-        self,
-        messages: list[Message],
-        config: GenerationConfig | None = None,
+        self, messages: list[Message], config: GenerationConfig | None = None,
     ) -> GenerationResult:
-        import httpx
-
-        config = config or GenerationConfig()
-        payload = {
-            "model": self._model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
-            "stream": False,
-            "options": {
-                "temperature": config.temperature,
-                "num_predict": config.max_tokens,
-            },
-        }
-        if config.stop_sequences:
-            payload["options"]["stop"] = config.stop_sequences
-
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(f"{self._base_url}/api/chat", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-
-        content = data.get("message", {}).get("content", "")
+        parts = []
+        async with aclosing(self._frames(messages, config)) as frames:
+            async for data in frames:
+                parts.append(data.get("message", {}).get("content", ""))
+        content = "".join(parts)
+        data["message"] = {**data.get("message", {}), "content": content}
         usage = {
             "prompt_tokens": data.get("prompt_eval_count", 0),
             "completion_tokens": data.get("eval_count", 0),

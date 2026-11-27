@@ -128,7 +128,15 @@ class TaskManager:
 
     async def _execute_task(self, task_id: str, approval_mode: str) -> None:
         """Background task execution."""
-        state = self._tasks[task_id]
+        state = self._tasks[task_id].model_copy(update={
+            "status": TaskStatus.IN_PROGRESS,
+            "updated_at": datetime.now(UTC),
+        })
+        self._tasks[task_id] = state
+
+        def observe(progress: AgentState, event: str, data: dict[str, Any]) -> None:
+            self._tasks[task_id] = progress.model_copy(deep=True)
+            self._emit_event(task_id, event, data)
 
         try:
             provider = self._provider
@@ -160,12 +168,15 @@ class TaskManager:
                 state.original_task,
                 max_iterations=state.max_iterations,
                 checkpoint_store=self._checkpoint_store,
+                initial_state=state,
+                observer=observe,
             )
-            # The orchestrator builds a fresh AgentState, which would mint a new
-            # task_id. The id returned by POST /tasks is the one clients poll.
             result.task_id = task_id
+            result.created_at = state.created_at
+            result.updated_at = datetime.now(UTC)
             self._tasks[task_id] = result
-            if result.status == TaskStatus.FAILED:
+            if result.status != TaskStatus.COMPLETED:
+                result.status = TaskStatus.FAILED
                 import httpx
 
                 result.errors = [
@@ -173,9 +184,11 @@ class TaskManager:
                     if any(text in error.lower() for text in (
                         "connection attempts failed", "connection refused",
                     )) else error
-                    for error in result.errors
+                    for error in result.errors if error.strip()
                 ]
-                message = "; ".join(result.errors) or "Task failed"
+                if not result.errors:
+                    result.errors.append("Task ended early. Check the task audit and retry.")
+                message = "; ".join(result.errors)
                 self._audit.record(
                     task_id=task_id,
                     event_type=AuditEventType.ERROR,
@@ -200,12 +213,23 @@ class TaskManager:
                 "artifacts": len(result.artifacts),
             })
 
-        except Exception as e:
-            logger.error("task_execution_failed", task_id=task_id, error=str(e))
-            message = friendly_provider_error(e) or str(e)
+        except (Exception, asyncio.CancelledError) as e:
+            logger.exception(
+                "task_execution_failed", task_id=task_id, exception_type=type(e).__name__,
+            )
+            state = self._tasks[task_id]
+            agent = state.current_agent.value if state.current_agent else "orchestrator"
+            message = (friendly_provider_error(e) or "").strip() or str(e).strip() or (
+                f"{agent} failed ({type(e).__name__}). Check the server logs and retry."
+            )
+            state.updated_at = datetime.now(UTC)
             state.status = TaskStatus.FAILED
             state.errors.append(message)
-            self._tasks[task_id] = state
+            if state.plan:
+                for subtask in state.plan.subtasks:
+                    if subtask.id == state.current_subtask_id:
+                        subtask.status = TaskStatus.FAILED
+                        break
 
             self._audit.record(
                 task_id=task_id,
@@ -214,6 +238,9 @@ class TaskManager:
             )
 
             self._emit_event(task_id, "error", {"message": message})
+
+            if isinstance(e, asyncio.CancelledError):
+                raise
 
         finally:
             self._running.pop(task_id, None)

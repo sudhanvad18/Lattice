@@ -12,7 +12,7 @@ Key concepts:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
@@ -101,6 +101,9 @@ class AgentState(BaseModel):
     task_id: str = Field(default_factory=lambda: str(uuid4()))
     original_task: str = Field(..., description="The user's original task description")
     plan: Optional[TaskPlan] = None
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Agent outputs
     artifacts: list[Artifact] = Field(default_factory=list)

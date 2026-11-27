@@ -124,3 +124,17 @@ class TestTaskResults:
         # Should have at least the task_created event
         assert len(data["events"]) >= 1
         assert data["events"][0]["event_type"] == "task_created"
+
+
+async def test_empty_exception_includes_phase_and_exception_type():
+    class FailingProvider(MockProvider):
+        async def generate(self, messages, config=None):
+            raise ValueError("   ")
+
+    manager = TaskManager(provider=FailingProvider())
+    task = await manager.submit_task("Plan a briefing")
+    await manager._running[task.task_id]
+    failed = manager.get_task(task.task_id)
+    assert failed.status == TaskStatus.FAILED
+    assert "orchestrator" in failed.errors[0] and "ValueError" in failed.errors[0]
+    assert "retry" in failed.errors[0]
