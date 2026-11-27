@@ -464,6 +464,31 @@ def test_fenced_review():
     assert verdict.approved and verdict.reasoning == "Sources verified"
 
 
+async def test_structured_agent_steps_request_json():
+    class RecordingProvider(MockProvider):
+        def __init__(self):
+            super().__init__(responses=[
+                '{"subtasks":[{"description":"Find","assigned_to":"researcher"},'
+                '{"description":"Draft","assigned_to":"writer","depends_on":[0]}]}',
+                '{"approved":true,"confidence":0.9}',
+            ])
+            self.configs = []
+
+        async def generate(self, messages, config=None):
+            self.configs.append(config)
+            return await super().generate(messages, config)
+
+    provider = RecordingProvider()
+    state = AgentState(original_task="Research and draft a briefing")
+    await OrchestratorAgent(provider).execute(state)
+    state.artifacts.append(Artifact(
+        artifact_type="document", content="Draft", source_agent=AgentRole.WRITER,
+    ))
+    await ReviewerAgent(provider).execute(state)
+    assert len(provider.configs) == 2
+    assert all(config.json_output for config in provider.configs)
+
+
 async def test_long_plan_stops_at_dispatch_budget():
     plan = {"subtasks": [{"description": f"Section {i}", "assigned_to": "writer"}
                          for i in range(13)]}

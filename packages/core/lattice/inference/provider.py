@@ -52,6 +52,7 @@ class GenerationConfig:
     temperature: float = 0.7
     max_tokens: int = 2048
     stop_sequences: list[str] = field(default_factory=list)
+    json_output: bool = False  # Request native JSON mode where supported.
 
 
 @dataclass
@@ -118,6 +119,8 @@ class OllamaProvider(LLMProvider):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "stream": True, "options": options,
         }
+        if config.json_output:
+            payload["format"] = "json"
         async with (
             httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client,
             client.stream("POST", f"{self._base_url}/api/chat", json=payload) as response,
@@ -185,6 +188,9 @@ class OllamaProvider(LLMProvider):
         }
         if config.stop_sequences:
             payload["options"]["stop"] = config.stop_sequences
+
+        if config.json_output:
+            payload["format"] = "json"
 
         with httpx.Client(timeout=120.0) as client:
             resp = client.post(f"{self._base_url}/api/chat", json=payload)
@@ -341,6 +347,7 @@ class OpenAIProvider(LLMProvider):
             messages=[{"role": m.role, "content": m.content} for m in messages],
             temperature=config.temperature, max_tokens=config.max_tokens,
             stop=config.stop_sequences or None, stream=True,
+            **({"response_format": {"type": "json_object"}} if config.json_output else {}),
         )
         try:
             async for chunk in response:
@@ -362,6 +369,7 @@ class OpenAIProvider(LLMProvider):
             temperature=config.temperature,
             max_tokens=config.max_tokens,
             stop=config.stop_sequences or None,
+            **({"response_format": {"type": "json_object"}} if config.json_output else {}),
         )
 
         content = response.choices[0].message.content or ""
@@ -392,6 +400,7 @@ class OpenAIProvider(LLMProvider):
             temperature=config.temperature,
             max_tokens=config.max_tokens,
             stop=config.stop_sequences or None,
+            **({"response_format": {"type": "json_object"}} if config.json_output else {}),
         )
 
         content = response.choices[0].message.content or ""

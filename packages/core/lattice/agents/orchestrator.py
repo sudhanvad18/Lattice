@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from graphlib import TopologicalSorter
 from typing import TYPE_CHECKING, Any
@@ -91,13 +92,16 @@ Rules:
 - Writing tasks should depend on research tasks
 - The reviewer is invoked automatically after writing, don't plan it explicitly
 - Prefer one KB research step followed by one briefing. Combine related research questions.
+- Research uses the current knowledge base; no web browsing is available.
+- Do not promise a web search.
 - Identify evidence gaps. Code examples are illustrative only. Never execute code or write files.
 - Dependencies are zero-based indices into subtasks."""
 
     async def execute(self, state: AgentState) -> AgentState:
         """Create a task plan (only called during planning phase)."""
         result = await self._call_llm(
-            f"Decompose this task into subtasks:\n\n{state.original_task}"
+            f"Decompose this task into subtasks:\n\n{state.original_task}",
+            config=replace(self._config, temperature=0.1, json_output=True),
         )
 
         plan = self._parse_plan(result.content, state.original_task)

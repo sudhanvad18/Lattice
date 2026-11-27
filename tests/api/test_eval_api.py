@@ -102,7 +102,14 @@ def test_run_saves_results(client, results_path, monkeypatch):
     events = MagicMock()
     monkeypatch.setattr(get_task_manager(), "emit", events, raising=False)
     monkeypatch.setattr(eval_routes, "require_provider", AsyncMock())
-    monkeypatch.setattr(eval_routes, "get_provider", MockProvider)
+    provider = MockProvider(responses=[
+        '{"subtasks":[{"description":"Research Widget","assigned_to":"researcher"},'
+        '{"description":"Explain Widget","assigned_to":"writer","depends_on":[0]}]}',
+        'Widget is a class in the knowledge base [chunk].',
+        'Widget is a documented class [chunk].',
+        '{"approved":true,"confidence":0.9,"issues":[],"suggestions":[],"reasoning":"Grounded"}',
+    ])
+    monkeypatch.setattr(eval_routes, "get_provider", lambda: provider)
     response = client.post("/eval/run", json={"limit": 1})
     assert response.status_code == 202
     assert response.json()["tasks"] == 1

@@ -148,6 +148,26 @@ async def test_ollama_stream_delivers_text_before_generation_finishes(monkeypatc
     assert requests[0]["options"]["stop"] == ["END"]
 
 
+async def test_ollama_generation_can_request_native_json(monkeypatch):
+    import json
+
+    import httpx
+
+    def handle(request):
+        payload = json.loads(request.content)
+        assert payload["format"] == "json"
+        return httpx.Response(200, content=b'{"message":{"content":"{}"},"done":true}\n')
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original_client(
+        transport=httpx.MockTransport(handle), **kw,
+    ))
+    result = await OllamaProvider().generate(
+        [Message("user", "Return JSON")], GenerationConfig(json_output=True),
+    )
+    assert result.content == "{}"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ending", [b'', b'{"error":"model failed"}\n'])
 async def test_ollama_stream_does_not_silently_accept_truncation(monkeypatch, ending):

@@ -38,6 +38,8 @@ Guidelines:
 - Cite sources using [source_id] notation where information came from research
 - Flag any areas where research was insufficient with [NEEDS_MORE_INFO]
 - Produce COMPLETE documents, not outlines or summaries
+- Distinguish research facts, proposed designs, and untested proof-of-concept code.
+- Do not claim external web research or executed tests unless the supplied research records them.
 
 Output the document content directly. Do NOT wrap in JSON."""
 

@@ -17,6 +17,7 @@ with the Reviewer's feedback.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import structlog
 
@@ -45,12 +46,15 @@ class ReviewerAgent(BaseAgent):
 
 Your output MUST be a JSON object with this exact structure:
 {
-    "approved": true/false,
-    "confidence": 0.0-1.0,
+    "approved": false,
+    "confidence": 0.8,
     "issues": ["issue 1", "issue 2"],
     "suggestions": ["suggestion 1", "suggestion 2"],
     "reasoning": "Brief explanation of your verdict"
 }
+
+Set approved to true only when the artifact meets the criteria, otherwise false.
+Confidence is a number from 0.0 to 1.0. Return only valid JSON, with concise feedback.
 
 Evaluation criteria:
 - ACCURACY: Is the content factually correct based on cited sources?
@@ -100,7 +104,10 @@ Reject if there are factual errors, missing critical information, or poor qualit
             f"Evaluate against the original task requirements and source research."
         )
 
-        result = await self._call_llm(user_msg, context=context)
+        result = await self._call_llm(
+            user_msg, context=context,
+            config=replace(self._config, temperature=0.1, json_output=True),
+        )
 
         # Parse the review verdict
         verdict = self._parse_verdict(result.content, artifact_to_review.id)
