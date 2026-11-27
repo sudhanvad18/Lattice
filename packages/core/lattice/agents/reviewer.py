@@ -118,27 +118,19 @@ Reject if there are factual errors, missing critical information, or poor qualit
     def _parse_verdict(self, content: str, artifact_id: str) -> ReviewVerdict:
         """Parse the LLM's JSON verdict, with fallback for malformed responses."""
         try:
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start != -1 and end > start:
-                data = json.loads(content[start:end])
-                return ReviewVerdict(
-                    artifact_id=artifact_id,
-                    approved=bool(data.get("approved", False)),
-                    confidence=float(data.get("confidence", 0.5)),
-                    issues=data.get("issues", []),
-                    suggestions=data.get("suggestions", []),
-                    reasoning=data.get("reasoning", ""),
-                )
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            payload = content.strip()
+            if payload.startswith("```") and payload.endswith("```"):
+                _, _, payload = payload[:-3].partition("\n")
+            data = json.loads(payload)
+            if not isinstance(data, dict) or type(data.get("approved")) is not bool:
+                raise ValueError("Expected a boolean approved field")
+            return ReviewVerdict(artifact_id=artifact_id, **data)
+        except (ValueError, TypeError) as e:
             logger.warning("reviewer_parse_failed", error=str(e))
 
-        # Fallback: try to infer from content
-        content_lower = content.lower()
-        approved = "approve" in content_lower and "reject" not in content_lower
         return ReviewVerdict(
             artifact_id=artifact_id,
-            approved=approved,
+            approved=False,
             confidence=0.5,
             issues=["Could not parse structured review"],
             suggestions=["Review response was not in expected JSON format"],

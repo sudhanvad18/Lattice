@@ -61,3 +61,8 @@ def test_friendly_error_maps_connect_error():
     assert message and "ollama serve" in message
     assert friendly_provider_error(ValueError("boom")) is None
     assert friendly_provider_error(health.ProviderUnavailableError("down")) == "down"
+
+
+def test_blank_timeout_has_actionable_message():
+    message = friendly_provider_error(httpx.ReadTimeout(""))
+    assert "timed out" in message and "retry" in message

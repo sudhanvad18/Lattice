@@ -89,7 +89,7 @@ async def check_provider(timeout: float = _PROBE_TIMEOUT_SECONDS) -> ProviderHea
 def friendly_provider_error(exc: BaseException) -> str | None:
     """Actionable message if `exc` means the model is unreachable, else None."""
     if isinstance(exc, ProviderUnavailableError):
-        return str(exc)
+        return str(exc).strip() or "The model is unavailable. Check the provider and retry."
     try:
         import httpx
     except ImportError:  # pragma: no cover
@@ -100,6 +100,8 @@ def friendly_provider_error(exc: BaseException) -> str | None:
             return ollama_unreachable_message(settings.ollama_base_url, settings.ollama_model)
         name = settings.default_provider.value
         return f"The {name} API could not be reached. Check your network."
+    if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+        return "The model request timed out. Check the provider's status and retry the task."
     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
         settings = get_settings()
         if settings.default_provider == InferenceProvider.OLLAMA:

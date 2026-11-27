@@ -102,6 +102,9 @@ class _FakeSocket:
     async def accept(self) -> None:
         self.accepted = True
 
+    async def close(self) -> None:
+        self.closed = True
+
     async def send_json(self, data: dict) -> None:
         self.sent.append(data)
 
@@ -116,6 +119,12 @@ async def test_completed_task_keeps_the_submitted_id():
     assert stored is not None
     assert stored.task_id == submitted
     assert stored.status == "completed"
+    events = manager.recent_events()
+    assert {event["task_id"] for event in events} == {submitted}
+    assert events[-1]["event"] == "task_complete"
+    [review] = [event for event in events if event["event"] == "review_complete"]
+    assert review["data"]["approved"] and review["data"]["agent"] == "reviewer"
+    assert review["data"]["message"] and review["timestamp"]
     assert stored.original_task == "Document the API"
     assert any(artifact.artifact_type == "document" for artifact in stored.artifacts)
 
@@ -183,7 +192,9 @@ def test_activity_socket_replays_real_task_ids(tmp_path, monkeypatch):
     assert [event["task_id"] for event in expected] == [first, second]
 
     with client.websocket_connect("/ws/activity") as ws:
-        messages = [ws.receive_json() for _ in expected]
+        messages = []
+        while sum(m["event"] == "task_created" for m in messages) < len(expected):
+            messages.append(ws.receive_json())
 
     created = [message for message in messages if message["event"] == "task_created"]
     assert [message["task_id"] for message in created] == [first, second]
@@ -200,19 +211,19 @@ def test_task_socket_replays_only_that_task_then_closes(tmp_path, monkeypatch):
     kb.ingest_text("API documentation describes the service." * 30)
     manager = _manager()
     client = TestClient(create_app(task_manager=manager, knowledge_base=kb))
-    task_id = client.post("/tasks", json={"task": "Document the API"}).json()["task_id"]
-    client.post("/tasks", json={"task": "Other task"})
-    manager._emit_event(task_id, "task_complete", {"status": "completed", "artifacts": 1})
+    manager.emit("other-task", "task_created", {"task": "Another briefing"})
+    with client:
+        task_id = client.post("/tasks", json={"task": "Document the API"}).json()["task_id"]
+        messages = []
+        with client.websocket_connect(f"/ws/{task_id}") as ws:
+            while True:
+                try:
+                    messages.append(ws.receive_json())
+                except WebSocketDisconnect:
+                    break
 
-    messages = []
-    with client.websocket_connect(f"/ws/{task_id}") as ws:
-        while True:
-            try:
-                messages.append(ws.receive_json())
-            except WebSocketDisconnect:
-                break
-
-    assert [message["event"] for message in messages] == ["task_created", "task_complete"]
+    assert messages[0]["event"] == "task_created"
+    assert messages[-1]["event"] == "task_complete"
     assert {message["task_id"] for message in messages} == {task_id}
     assert messages[-1]["data"]["status"] == "completed"
 
@@ -235,3 +246,58 @@ async def test_activity_stream_pushes_events_after_subscribe():
     assert socket.sent[0]["task_id"] == "live-task"
     assert socket.sent[0]["data"]["task"] == "Live task"
     assert socket.sent[0]["timestamp"]
+
+
+async def test_live_progress_and_partial_draft_after_blank_review_timeout(monkeypatch):
+    import httpx
+
+    entered_review = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowReview(MockProvider):
+        async def generate(self, messages, config=None):
+            if self.call_count == 3:
+                entered_review.set()
+                await release.wait()
+                raise httpx.ReadTimeout("")
+            return await super().generate(messages, config)
+
+    async def reachable():
+        return ProviderHealth("ollama", "test", True)
+
+    monkeypatch.setattr("lattice_api.errors.check_provider", reachable)
+    manager = TaskManager(provider=SlowReview(responses=[PLAN, RESEARCH, DOCUMENT]))
+    app = create_app(task_manager=manager, knowledge_base=_EmptyKB())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as api:
+        submitted = (await api.post("/tasks", json={"task": "Write a briefing"})).json()
+        task_id = submitted["task_id"]
+        run = manager._running[task_id]
+        await asyncio.wait_for(entered_review.wait(), 2)
+        status = (await api.get(f"/tasks/{task_id}")).json()
+        assert status["status"] == "in_progress" and status["current_agent"] == "reviewer"
+        assert status["iteration_count"] == status["artifact_count"] == 2
+        assert status["created_at"] == submitted["created_at"]
+        assert (await api.get("/tasks")).json() == [status]
+
+        release.set()
+        await run
+        failed = (await api.get(f"/tasks/{task_id}")).json()
+        assert failed["created_at"] == submitted["created_at"]
+        assert failed["updated_at"] > status["updated_at"]
+        assert failed["status"] == "failed"
+        assert "timed out" in failed["errors"][0]
+        assert (await api.get("/tasks")).json() == [failed]
+        result = (await api.get(f"/tasks/{task_id}/result")).json()
+        assert result["artifacts"][-1]["content"] == DOCUMENT
+        assert failed["errors"][0] in result["audit_trail"][-1]["summary"]
+
+    socket = _FakeSocket()
+    await _stream_task_events(socket, task_id)
+    assert socket.closed
+    assert {event["task_id"] for event in socket.sent} == {task_id}
+    events = [event["event"] for event in socket.sent]
+    assert events.count("plan_created") == 1 and events.count("artifact_produced") == 2
+    assert events.count("agent_started") == 4 and events.count("agent_completed") == 3
+    assert events[-1] == "error" and "task_complete" not in events
+    assert socket.sent[-1]["data"]["message"] == failed["errors"][0]
+    assert all(event["data"]["agent"] and event["data"]["message"] for event in socket.sent[1:-1])

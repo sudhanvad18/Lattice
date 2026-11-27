@@ -428,5 +428,64 @@ class TestOrchestrator:
         result = await orchestrator.run("Write a report", max_iterations=4)
 
         assert result.iteration_count == 4
-        assert len(result.reviews) == 3
+        assert result.status == TaskStatus.FAILED
+        assert "Still wrong" in result.errors[-1]
+        assert len(result.reviews) == 4
         assert all(not review.approved for review in result.reviews)
+
+
+@pytest.mark.parametrize("items", [
+    None, [], [None], [{}],
+    [{"assigned_to": "code", "description": "Run code"}],
+    [{"assigned_to": "writer", "description": " "}],
+    *[[{"assigned_to": "writer", "description": "Draft", "depends_on": bad}]
+      for bad in ([0], [1], [-1], [False], ["0"], None, "0")],
+    [{"assigned_to": "writer", "description": "Draft", "depends_on": [1]},
+     {"assigned_to": "researcher", "description": "Find", "depends_on": [0]}],
+])
+def test_invalid_plan_uses_safe_fallback(items):
+    plan = OrchestratorAgent(MockProvider())._parse_plan(json.dumps({"subtasks": items}), "task")
+    research, writer = plan.subtasks
+    assert (research.assigned_to, writer.assigned_to) == (AgentRole.RESEARCHER, AgentRole.WRITER)
+    assert writer.depends_on == [research.id]
+
+
+@pytest.mark.parametrize("reply", ['{"approved": false', '{"approved":"false"}', "I approve"])
+def test_unstructured_review_fails_closed(reply):
+    verdict = ReviewerAgent(MockProvider())._parse_verdict(reply, "draft")
+    assert not verdict.approved
+    assert verdict.issues and verdict.suggestions
+
+
+def test_fenced_review():
+    verdict = ReviewerAgent(MockProvider())._parse_verdict(
+        '```json\n{"approved":true,"reasoning":"Sources verified"}\n```', "draft",
+    )
+    assert verdict.approved and verdict.reasoning == "Sources verified"
+
+
+async def test_long_plan_stops_at_dispatch_budget():
+    plan = {"subtasks": [{"description": f"Section {i}", "assigned_to": "writer"}
+                         for i in range(13)]}
+    provider = MockProvider(responses=[json.dumps(plan)] + ["Draft", '{"approved":true}'] * 12)
+    result = await OrchestratorAgent(provider).run("Write sections", max_iterations=12)
+    assert result.status == TaskStatus.FAILED
+    assert "Iteration limit" in result.errors[-1]
+    assert result.iteration_count == len(result.artifacts) == len(result.reviews) == 12
+
+
+@pytest.mark.parametrize("status", [TaskStatus.FAILED, TaskStatus.PENDING])
+async def test_unschedulable_required_work_fails(status, monkeypatch):
+    orchestrator = OrchestratorAgent(MockProvider())
+
+    async def plan(state):
+        state.plan = TaskPlan(task_description="task", subtasks=[
+            SubTask(description="blocked", assigned_to=AgentRole.WRITER,
+                    depends_on=["missing"], status=status),
+        ])
+        return state
+
+    monkeypatch.setattr(orchestrator, "execute", plan)
+    result = await orchestrator.run("task")
+    assert result.status == TaskStatus.FAILED and result.errors
+    assert result.iteration_count == 0

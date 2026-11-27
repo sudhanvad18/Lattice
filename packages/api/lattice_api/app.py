@@ -32,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from lattice.agents.state import AgentState
 from lattice.config import get_settings
 from lattice.inference import get_provider
 from lattice.inference.health import check_provider, friendly_provider_error
@@ -233,6 +234,20 @@ def create_app(
 
     # --- Task Endpoints ---
 
+    def task_status(state: AgentState) -> TaskStatusResponse:
+        return TaskStatusResponse(
+            task_id=state.task_id,
+            status=state.status.value,
+            original_task=state.original_task,
+            current_agent=state.current_agent.value if state.current_agent else None,
+            iteration_count=state.iteration_count,
+            artifact_count=len(state.artifacts),
+            review_count=len(state.reviews),
+            created_at=state.created_at,
+            updated_at=state.updated_at,
+            errors=state.errors,
+        )
+
     @app.post("/tasks", response_model=TaskStatusResponse)
     async def submit_task(request: TaskSubmitRequest):
         """Submit a new task to the agent team."""
@@ -244,35 +259,14 @@ def create_app(
             max_iterations=request.max_iterations,
             approval_mode=request.approval_mode,
         )
-        return TaskStatusResponse(
-            task_id=state.task_id,
-            status=state.status.value,
-            original_task=state.original_task,
-            current_agent=state.current_agent.value if state.current_agent else None,
-            iteration_count=state.iteration_count,
-            artifact_count=len(state.artifacts),
-            review_count=len(state.reviews),
-            created_at=datetime.utcnow(),
-        )
+        return task_status(state)
 
     @app.get("/tasks", response_model=list[TaskStatusResponse])
     async def list_tasks():
         """List all submitted tasks."""
         tm = get_task_manager()
         tasks = tm.get_all_tasks()
-        return [
-            TaskStatusResponse(
-                task_id=t.task_id,
-                status=t.status.value,
-                original_task=t.original_task,
-                current_agent=t.current_agent.value if t.current_agent else None,
-                iteration_count=t.iteration_count,
-                artifact_count=len(t.artifacts),
-                review_count=len(t.reviews),
-                created_at=datetime.utcnow(),
-            )
-            for t in tasks
-        ]
+        return [task_status(t) for t in tasks]
 
     @app.get("/tasks/{task_id}", response_model=TaskStatusResponse)
     async def get_task_status(task_id: str):
@@ -281,17 +275,7 @@ def create_app(
         state = tm.get_task(task_id)
         if not state:
             raise HTTPException(status_code=404, detail="Task not found")
-        return TaskStatusResponse(
-            task_id=state.task_id,
-            status=state.status.value,
-            original_task=state.original_task,
-            current_agent=state.current_agent.value if state.current_agent else None,
-            iteration_count=state.iteration_count,
-            artifact_count=len(state.artifacts),
-            review_count=len(state.reviews),
-            created_at=datetime.utcnow(),
-            errors=state.errors,
-        )
+        return task_status(state)
 
     @app.get("/tasks/{task_id}/result", response_model=TaskResultResponse)
     async def get_task_result(task_id: str):
