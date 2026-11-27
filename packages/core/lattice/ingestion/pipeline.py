@@ -76,7 +76,10 @@ class IngestionPipeline:
         glob_pattern: str = "**/*",
         extensions: Optional[set[str]] = None,
     ) -> list[Chunk]:
-        """Ingest all supported files in a directory."""
+        """Ingest supported files, excluding dependency/cache directories by default.
+
+        An explicit glob pattern can include those directories when needed.
+        """
         directory = Path(directory)
         if not directory.is_dir():
             raise NotADirectoryError(f"Not a directory: {directory}")
@@ -89,8 +92,16 @@ class IngestionPipeline:
         all_chunks: list[Chunk] = []
         files_processed = 0
         files_skipped = 0
+        ignored_directories = {
+            "node_modules", ".git", ".venv", "venv", "__pycache__",
+            ".pytest_cache", ".mypy_cache", ".ruff_cache", ".next", ".npm-cache",
+        }
 
         for path in sorted(directory.glob(glob_pattern)):
+            if glob_pattern == "**/*" and ignored_directories.intersection(
+                path.relative_to(directory).parts[:-1]
+            ):
+                continue
             if not path.is_file():
                 continue
             if path.suffix.lower() not in valid_extensions:

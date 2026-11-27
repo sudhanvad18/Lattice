@@ -122,7 +122,7 @@ $(cat "$AI/task-$task.md")"
     if git -C "$wt" diff --cached --quiet; then
       echo "no changes to commit"
     else
-      git -C "$wt" commit -q --no-verify -m "agent($task/$worker): $(head -1 "$AI/task-$task.md" | sed 's/^#* *//')" \
+      git -C "$wt" commit -q -m "agent($task/$worker): $(head -1 "$AI/task-$task.md" | sed 's/^#* *//')" \
         && echo "committed $(git -C "$wt" rev-parse --short HEAD) on $branch"
     fi
   } >>"$log" 2>&1

@@ -23,7 +23,7 @@ logger = structlog.get_logger()
 class IngestionCache:
     """Content-hash cache for the ingestion pipeline.
 
-    Maps SHA256(file_content) -> cached chunk data so unchanged files
+    Maps SHA256(absolute_path + file_content) -> cached chunk data so unchanged files
     are skipped on re-ingestion. Chunk content is stored in separate
     files to keep the index lightweight.
     """
@@ -54,8 +54,12 @@ class IngestionCache:
         )
 
     @staticmethod
-    def _hash_content(content: bytes) -> str:
-        return hashlib.sha256(content).hexdigest()
+    def _cache_key(path: Path, content: bytes) -> str:
+        # Chunks carry source-specific IDs and metadata. Identical bytes at two
+        # paths must not reuse the same document/chunk records. The prefix also
+        # prevents reuse of legacy content-only entries with incorrect sources.
+        identity = str(Path(path).absolute()).encode("utf-8") + b"\0" + content
+        return "v2-" + hashlib.sha256(identity).hexdigest()
 
     def is_cached(self, path: Path) -> bool:
         """Check if a file's content hash exists in the cache."""
@@ -63,7 +67,7 @@ class IngestionCache:
             content = Path(path).read_bytes()
         except OSError:
             return False
-        h = self._hash_content(content)
+        h = self._cache_key(path, content)
         if h not in self._index:
             return False
         chunk_file = self._chunks_dir / f"{h}.json"
@@ -75,7 +79,7 @@ class IngestionCache:
             content = Path(path).read_bytes()
         except OSError:
             return None
-        h = self._hash_content(content)
+        h = self._cache_key(path, content)
         if h not in self._index:
             return None
         chunk_file = self._chunks_dir / f"{h}.json"
@@ -96,7 +100,7 @@ class IngestionCache:
             content = Path(path).read_bytes()
         except OSError:
             return
-        h = self._hash_content(content)
+        h = self._cache_key(path, content)
 
         chunk_data = [c.model_dump(mode="json", exclude={"embedding"}) for c in chunks]
         chunk_file = self._chunks_dir / f"{h}.json"
@@ -116,7 +120,7 @@ class IngestionCache:
             content = Path(path).read_bytes()
         except OSError:
             return False
-        h = self._hash_content(content)
+        h = self._cache_key(path, content)
         if h in self._index:
             self._index.pop(h)
             chunk_file = self._chunks_dir / f"{h}.json"

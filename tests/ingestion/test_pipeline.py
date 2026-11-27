@@ -128,6 +128,25 @@ class TestSemanticChunking:
 
 
 class TestPipeline:
+    def test_default_ingest_excludes_dependency_and_cache_directories(self, tmp_path):
+        content = "Source content with enough words to produce a document chunk. " * 30
+        source = tmp_path / "src" / "main.txt"
+        source.parent.mkdir()
+        source.write_text(content)
+        for name in ("node_modules", ".git", ".venv", ".next", ".npm-cache"):
+            ignored = tmp_path / name / "nested" / "dependency.txt"
+            ignored.parent.mkdir(parents=True)
+            ignored.write_text(content)
+
+        pipeline = IngestionPipeline()
+        chunks = pipeline.ingest_directory(tmp_path)
+        assert chunks
+        assert {c.metadata.source for c in chunks} == {str(source)}
+        # Explicitly targeting dependencies remains possible.
+        explicit = pipeline.ingest_directory(tmp_path, glob_pattern="node_modules/**/*.txt")
+        assert explicit
+        assert all("node_modules" in c.metadata.source for c in explicit)
+
     def test_ingest_file(self):
         pipeline = IngestionPipeline()
         chunks = pipeline.ingest_file(FIXTURES / "sample_maintenance.md")

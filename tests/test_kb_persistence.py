@@ -58,6 +58,28 @@ def test_kb_reloads_graph_and_vectors(tmp_path):
         second.close()
 
 
+def test_identical_files_ingest_with_distinct_sources_and_stable_ids(tmp_path):
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    paths = [sources / "first.md", sources / "second.md"]
+    for path in paths:
+        path.write_text(SAMPLE)
+    kb = KnowledgeBase(tmp_path / "kb")
+    try:
+        assert kb.ingest_directory(sources) > 0
+        original_ids = kb.vector_store.chunk_ids()
+        counts = kb.source_counts()
+        assert set(counts) == {str(path) for path in paths}
+        assert counts[str(paths[0])] == counts[str(paths[1])] > 0
+        assert kb.stats["chunks_stored"] == sum(counts.values())
+
+        kb.ingest_directory(sources)
+        assert kb.vector_store.chunk_ids() == original_ids
+        assert kb.source_counts() == counts
+    finally:
+        kb.close()
+
+
 @pytest.mark.parametrize("content", ["{broken", '{"version": 99}',
                                      '{"version": 1, "entities": [{}], "relations": []}'])
 def test_corrupt_graph_recovers(tmp_path, content, monkeypatch):

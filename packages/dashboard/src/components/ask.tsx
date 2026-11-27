@@ -12,7 +12,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import {
-  chatQuery,
+  streamChat,
   submitTask,
   getTaskResult,
   createWebSocket,
@@ -26,6 +26,9 @@ import { useKB } from "@/lib/kb-context";
 type AskMode = "answer" | "agent";
 
 interface ConversationMessage {
+  id?: string;
+  streaming?: boolean;
+  streamStatus?: string;
   role: "user" | "assistant";
   content: string;
   citations?: ChatCitation[];
@@ -51,41 +54,64 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const answerController = useRef<AbortController | null>(null);
+  const followAnswer = useRef(true);
+
+  useEffect(() => () => answerController.current?.abort(), []);
 
   const kbReady = kb?.ready ?? false;
   const modelReachable = apiReachable && !!health && !!health.provider?.reachable;
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    if (followAnswer.current && scrollRef.current) {
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight,
+        behavior: messages.some((m) => m.streaming) ? "auto" : "smooth" });
+    }
   }, [messages]);
 
   // --- Answer mode ---
 
   const sendAnswer = useCallback(
     async (userMessage: string) => {
-      const history = messages.map((m) => ({ role: m.role, content: m.content }));
+      const history = messages.filter((m) => !m.streaming && !m.agentRun)
+        .map((m) => ({ role: m.role, content: m.content }));
+      const id = crypto.randomUUID();
+      const controller = new AbortController();
+      answerController.current = controller;
+      setMessages((prev) => [...prev, {
+        id, role: "assistant", content: "", streaming: true,
+        streamStatus: "Searching knowledge base…", timestamp: new Date(),
+      }]);
+      const update = (change: (message: ConversationMessage) => ConversationMessage) => {
+        if (!controller.signal.aborted) {
+          setMessages((prev) => prev.map((m) => m.id === id ? change(m) : m));
+        }
+      };
       try {
-        const res = await chatQuery(userMessage, history);
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: res.response,
-            citations: res.citations,
-            chatMode: res.mode,
-            notice: res.notice,
-            timestamp: new Date(),
-          },
-        ]);
+        await streamChat(userMessage, history, ({ event, data }) => {
+          switch (event) {
+            case "status":
+              update((m) => ({ ...m, streamStatus: data.message }));
+              break;
+            case "sources":
+              update((m) => ({ ...m, citations: data.citations }));
+              break;
+            case "delta":
+              update((m) => ({ ...m, content: m.content + data.text,
+                streamStatus: "Generating answer…" }));
+              break;
+            case "done":
+              update((m) => ({ ...m, content: data.response, citations: data.citations,
+                chatMode: data.mode, notice: data.notice, streaming: false,
+                streamStatus: undefined }));
+              break;
+          }
+        }, controller.signal);
       } catch (err) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: err instanceof Error ? err.message : "Could not get an answer.",
-            timestamp: new Date(),
-          },
-        ]);
+        update((m) => ({ ...m, streaming: false, streamStatus: undefined,
+          notice: err instanceof Error ? err.message : "Could not get an answer." }));
+      } finally {
+        if (answerController.current === controller) answerController.current = null;
       }
     },
     [messages],
@@ -184,10 +210,11 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
     async (e: React.FormEvent) => {
       e.preventDefault();
       const text = input.trim();
-      if (!text || loading) return;
+      if (!text || loading || answerController.current) return;
 
       setMessages((prev) => [...prev, { role: "user", content: text, timestamp: new Date() }]);
       setInput("");
+      followAnswer.current = true;
       setLoading(true);
 
       if (mode === "answer") {
@@ -241,7 +268,10 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
       )}
 
       {/* Thread */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto scrollbar-thin space-y-4 mb-4">
+      <div ref={scrollRef} onScroll={(event) => {
+        const node = event.currentTarget;
+        followAnswer.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+      }} className="flex-1 overflow-y-auto scrollbar-thin space-y-4 mb-4">
         {messages.length === 0 && kbReady && (
           <div className="flex flex-col items-center justify-center h-full text-zinc-600">
             <BookOpen className="w-10 h-10 mb-3" />
@@ -266,13 +296,7 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
           <MessageBubble key={i} msg={msg} />
         ))}
 
-        {loading && mode === "answer" && (
-          <div className="flex justify-start">
-            <div className="bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3">
-              <Loader2 className="w-4 h-4 animate-spin text-zinc-500" />
-            </div>
-          </div>
-        )}
+
       </div>
 
       {/* Composer */}
@@ -402,19 +426,25 @@ function MessageBubble({ msg }: { msg: ConversationMessage }) {
 
   // Assistant: answer
   const citations = msg.citations ?? [];
-  const chatMode = msg.chatMode;
   const openCitation = citations.find((c) => c.index === expandedCitation);
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] rounded-xl px-4 py-3 bg-zinc-900 border border-zinc-800 text-zinc-300">
-        {chatMode === "retrieval_only" && msg.notice && (
+      <div aria-busy={msg.streaming ?? false}
+        className="max-w-[80%] rounded-xl px-4 py-3 bg-zinc-900 border border-zinc-800 text-zinc-300">
+        {msg.notice && (
           <div className="mb-2 px-2 py-1.5 bg-amber-950/30 border border-amber-800 rounded-lg text-xs text-amber-300 flex items-center gap-1.5">
             <AlertTriangle className="w-3 h-3 shrink-0" />
             {msg.notice}
           </div>
         )}
 
+        {msg.streaming && (
+          <div role="status" className="flex items-center gap-2 text-xs text-zinc-400 mb-2">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            {msg.streamStatus}
+          </div>
+        )}
         <AnswerText content={msg.content} citations={citations}
           expandedCitation={expandedCitation} onToggle={setExpandedCitation} />
 

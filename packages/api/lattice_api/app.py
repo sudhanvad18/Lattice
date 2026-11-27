@@ -21,6 +21,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -28,13 +29,14 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Header, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from lattice.config import get_settings
 from lattice.inference import get_provider
 from lattice.inference.health import check_provider, friendly_provider_error
 from lattice_api.audit import AuditTrail
-from lattice_api.chat import answer_question, build_chat_answer
+from lattice_api.chat import answer_question, build_chat_answer, stream_answer
 from lattice_api.errors import require_kb, require_provider
 from lattice_api.eval_routes import router as eval_router
 from lattice_api.graph_routes import KnowledgeBaseDependency
@@ -350,6 +352,27 @@ def create_app(
         return {"task_id": task_id, "events": []}
 
     # --- Chat ---
+
+    @app.post("/chat/stream")
+    async def chat_stream(request: ChatRequest, kb: KnowledgeBaseDependency):
+        require_kb(kb)
+        notice = None
+        try:
+            provider = get_provider()
+        except Exception as exc:
+            provider = None
+            notice = friendly_provider_error(exc) or "The model is not configured. Check settings."
+
+        async def events():
+            async for event, data in stream_answer(
+                kb, provider, request.message, request.history, notice,
+            ):
+                yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+        return StreamingResponse(
+            events(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post("/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest, kb: KnowledgeBaseDependency):

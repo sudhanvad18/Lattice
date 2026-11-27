@@ -128,9 +128,7 @@ class TestIngestionCache:
         assert cache.is_cached(f) is True
 
         # Corrupt the chunk file
-        import hashlib
-        h = hashlib.sha256(b"Content").hexdigest()
-        chunk_file = tmp_path / "cache" / "chunks" / f"{h}.json"
+        chunk_file = next((tmp_path / "cache" / "chunks").glob("*.json"))
         chunk_file.write_text("CORRUPTED{{{")
 
         loaded = cache.load(f)
@@ -155,3 +153,54 @@ class TestIngestionCache:
         loaded = cache2.load(f)
         assert loaded is not None
         assert len(loaded) == 2
+
+    def test_identical_files_do_not_share_chunks(self, tmp_path):
+        from lattice.ingestion.pipeline import IngestionPipeline
+
+        root = tmp_path / "docs"
+        root.mkdir()
+        content = "Identical document content with enough words for chunking. " * 30
+        paths = [root / "first.txt", root / "second.txt"]
+        for path in paths:
+            path.write_text(content)
+        cache_dir = tmp_path / "cache"
+        pipeline = IngestionPipeline(cache=IngestionCache(cache_dir))
+        chunks = pipeline.ingest_directory(root)
+
+        assert len(chunks) >= 2
+        assert len({chunk.id for chunk in chunks}) == len(chunks)
+        assert {chunk.metadata.source for chunk in chunks} == {str(p) for p in paths}
+        assert len({chunk.document_id for chunk in chunks}) == 2
+        # Repeat after reopening the cache: IDs remain stable for each source.
+        repeated = IngestionPipeline(cache=IngestionCache(cache_dir)).ingest_directory(root)
+        assert [(c.id, c.metadata.source) for c in repeated] == [
+            (c.id, c.metadata.source) for c in chunks
+        ]
+
+    def test_invalidating_one_copy_preserves_other_copy(self, tmp_path):
+        cache = IngestionCache(tmp_path / "cache")
+        first, second = tmp_path / "first.txt", tmp_path / "second.txt"
+        for path in (first, second):
+            path.write_text("Identical contents")
+            cache.save(path, _make_chunks())
+
+        assert cache.invalidate(first)
+        assert cache.load(first) is None
+        assert cache.load(second) is not None
+
+    def test_legacy_content_only_entries_are_cache_misses(self, tmp_path):
+        import hashlib
+
+        root = tmp_path / "cache"
+        (root / "chunks").mkdir(parents=True)
+        path = tmp_path / "new-source.txt"
+        path.write_text("Identical contents")
+        key = hashlib.sha256(path.read_bytes()).hexdigest()
+        (root / "index.json").write_text(json.dumps({key: {"source": "wrong-source.txt"}}))
+        (root / "chunks" / f"{key}.json").write_text(json.dumps([
+            c.model_dump(mode="json") for c in _make_chunks()
+        ]))
+
+        cache = IngestionCache(root)
+        assert not cache.is_cached(path)
+        assert cache.load(path) is None

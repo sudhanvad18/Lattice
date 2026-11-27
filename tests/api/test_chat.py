@@ -178,3 +178,114 @@ def test_no_relevant_results_skips_model(kb, monkeypatch):
     assert body["citations"] == []
     assert provider.call_count == 0
     assert "doesn't cover that yet" in body["response"]
+
+
+def _stream_events(response):
+    import json
+
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = []
+    for frame in response.text.strip().split("\n\n"):
+        name, payload = frame.split("\n", 1)
+        events.append((name.removeprefix("event: "), json.loads(payload.removeprefix("data: "))))
+    return events
+
+
+def test_stream_gates_empty_kb_before_sending_headers(empty_kb):
+    response = TestClient(create_app(knowledge_base=empty_kb)).post(
+        "/chat/stream", json={"message": "What causes erosion?"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "kb_empty"
+
+
+def test_stream_emits_progress_deltas_and_final_citations(kb, monkeypatch):
+    class StreamingProvider(MockProvider):
+        async def stream(self, messages, config=None):
+            self._call_history.append(messages)
+            yield "Sand causes "
+            yield "erosion [1]."
+
+    provider = StreamingProvider()
+    monkeypatch.setattr("lattice_api.app.get_provider", lambda: provider)
+    response = TestClient(create_app(knowledge_base=kb)).post(
+        "/chat/stream", json={"message": "What causes fan blade erosion?"},
+    )
+    events = _stream_events(response)
+    assert [name for name, data in events] == [
+        "status", "sources", "status", "delta", "delta", "done",
+    ]
+    assert "sand ingestion" in provider.last_messages[-1].content
+    assert "".join(data["text"] for name, data in events if name == "delta") == (
+        "Sand causes erosion [1]."
+    )
+    final = events[-1][1]
+    assert final["response"] == "Sand causes erosion [1]."
+    assert final["mode"] == "answer"
+    assert [c["index"] for c in final["citations"]] == [1]
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_stream_provider_failure_preserves_partial_or_uses_retrieval(kb, monkeypatch, partial):
+    import httpx
+
+    class BrokenStream(MockProvider):
+        async def stream(self, messages, config=None):
+            if partial:
+                yield "Sand causes erosion [1]"
+            raise httpx.ConnectError("All connection attempts failed")
+
+    monkeypatch.setattr("lattice_api.app.get_provider", lambda: BrokenStream())
+    events = _stream_events(TestClient(create_app(knowledge_base=kb)).post(
+        "/chat/stream", json={"message": "What causes fan blade erosion?"},
+    ))
+    final = events[-1][1]
+    assert events[-1][0] == "done"
+    assert final["notice"]
+    assert "All connection attempts failed" not in final["notice"]
+    assert final["citations"]
+    if partial:
+        assert final["response"] == "Sand causes erosion [1]"
+        assert "partial" in final["notice"]
+    else:
+        assert final["mode"] == "retrieval_only"
+        assert "Retrieved passages" in final["response"]
+
+
+def test_stream_no_coverage_skips_provider(kb, monkeypatch):
+    provider = MockProvider()
+    monkeypatch.setattr("lattice_api.app.get_provider", lambda: provider)
+    monkeypatch.setattr(kb, "vector_search", lambda *args, **kwargs: [])
+    monkeypatch.setattr(kb, "graph_search", lambda *args, **kwargs: [])
+    events = _stream_events(TestClient(create_app(knowledge_base=kb)).post(
+        "/chat/stream", json={"message": "Uncovered topic"},
+    ))
+    assert [name for name, _ in events] == ["status", "done"]
+    assert "doesn't cover" in events[-1][1]["response"]
+    assert provider.call_count == 0
+
+
+def test_stream_provider_configuration_failure_returns_cited_fallback(kb, monkeypatch):
+    def unavailable():
+        raise ValueError("missing secret credentials")
+
+    monkeypatch.setattr("lattice_api.app.get_provider", unavailable)
+    events = _stream_events(TestClient(create_app(knowledge_base=kb)).post(
+        "/chat/stream", json={"message": "fan blade erosion"},
+    ))
+    assert events[-1][1]["mode"] == "retrieval_only"
+    assert events[-1][1]["citations"]
+    assert "secret credentials" not in events[-1][1]["notice"]
+
+
+def test_stream_retrieval_error_is_an_explicit_error_event(kb, monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("private storage error")
+
+    monkeypatch.setattr("lattice_api.app.get_provider", lambda: MockProvider())
+    monkeypatch.setattr(kb, "vector_search", fail)
+    events = _stream_events(TestClient(create_app(knowledge_base=kb)).post(
+        "/chat/stream", json={"message": "erosion"},
+    ))
+    assert [name for name, _ in events] == ["status", "error"]
+    assert "private storage" not in events[-1][1]["message"]

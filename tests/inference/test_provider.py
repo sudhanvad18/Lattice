@@ -84,3 +84,135 @@ class TestProviderFactory:
     def test_openai_requires_api_key(self):
         with pytest.raises(ValueError, match="LATTICE_OPENAI_API_KEY"):
             get_provider(InferenceProvider.OPENAI)
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_stream_falls_back_to_generate():
+    provider = MockProvider(responses=["Existing custom provider"])
+    assert [text async for text in provider.stream([Message("user", "hi")])] == [
+        "Existing custom provider",
+    ]
+    assert provider.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_early", [False, True])
+async def test_ollama_stream_delivers_text_before_generation_finishes(monkeypatch, close_early):
+    import asyncio
+    import json
+
+    import httpx
+
+    release = asyncio.Event()
+    requests = []
+
+    class Body(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield b'{"message":{"content":"First "},"done":false}\n'
+            await release.wait()
+            # Split a multibyte character across transport chunks.
+            line = '{"message":{"content":"caf\u00e9"},"done":false}\n'.encode()
+            split = line.index(b'\xc3') + 1
+            yield line[:split]
+            yield line[split:]
+            yield b'{"done":true}\n'
+
+        async def aclose(self):
+            self.closed = True
+
+    body = Body()
+
+    async def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, stream=body)
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original_client(
+        transport=httpx.MockTransport(handle), **kw,
+    ))
+    stream = OllamaProvider().stream(
+        [Message("user", "hello")], GenerationConfig(max_tokens=20, stop_sequences=["END"]),
+    )
+    assert await asyncio.wait_for(anext(stream), timeout=1) == "First "
+    assert not release.is_set()
+    if close_early:
+        await stream.aclose()
+    else:
+        release.set()
+        assert [text async for text in stream] == ["caf\u00e9"]
+    assert body.closed
+    assert requests[0]["stream"] is True
+    assert requests[0]["options"]["num_predict"] == 20
+    assert requests[0]["options"]["stop"] == ["END"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", [b'', b'{"error":"model failed"}\n'])
+async def test_ollama_stream_does_not_silently_accept_truncation(monkeypatch, ending):
+    import httpx
+
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, content=b'{"message":{"content":"Partial"}}\n' + ending,
+    ))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original_client(
+        transport=transport, **kw,
+    ))
+    stream = OllamaProvider().stream([Message("user", "hello")])
+    assert await anext(stream) == "Partial"
+    with pytest.raises(RuntimeError):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_cloud_provider_streams_and_closes_resources():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from lattice.inference.provider import AnthropicProvider, OpenAIProvider
+
+    async def text_parts():
+        yield "First "
+        yield "second"
+
+    class AnthropicStream:
+        closed = False
+        text_stream = text_parts()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            self.closed = True
+
+    anthropic_stream = AnthropicStream()
+    create = Mock(return_value=anthropic_stream)
+    anthropic = AnthropicProvider.__new__(AnthropicProvider)
+    anthropic._async_client = SimpleNamespace(messages=SimpleNamespace(stream=create))
+    anthropic._model = "test-claude"
+    messages = [Message("system", "grounded"), Message("user", "question")]
+    assert [text async for text in anthropic.stream(messages)] == ["First ", "second"]
+    assert anthropic_stream.closed
+    assert create.call_args.kwargs["system"] == "grounded"
+    assert create.call_args.kwargs["messages"] == [{"role": "user", "content": "question"}]
+
+    class OpenAIStream:
+        close = AsyncMock()
+
+        async def __aiter__(self):
+            for text in [None, "First ", "second"]:
+                delta = SimpleNamespace(content=text)
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+
+    openai_stream = OpenAIStream()
+    create = AsyncMock(return_value=openai_stream)
+    openai = OpenAIProvider.__new__(OpenAIProvider)
+    openai._async_client = SimpleNamespace(chat=SimpleNamespace(
+        completions=SimpleNamespace(create=create),
+    ))
+    openai._model = "test-openai"
+    assert [text async for text in openai.stream(messages)] == ["First ", "second"]
+    openai_stream.close.assert_awaited_once()
+    assert create.call_args.kwargs["stream"] is True

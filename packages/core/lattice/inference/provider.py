@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
@@ -80,6 +81,14 @@ class LLMProvider(ABC):
         config: GenerationConfig | None = None,
     ) -> GenerationResult: ...
 
+    async def stream(
+        self, messages: list[Message], config: GenerationConfig | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield generated text; existing custom providers can use this fallback."""
+        result = await self.generate(messages, config)
+        if result.content:
+            yield result.content
+
 
 class OllamaProvider(LLMProvider):
     """Local inference via Ollama.
@@ -91,6 +100,40 @@ class OllamaProvider(LLMProvider):
     def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2") -> None:
         self._base_url = base_url
         self._model = model
+
+    async def stream(
+        self, messages: list[Message], config: GenerationConfig | None = None,
+    ) -> AsyncIterator[str]:
+        import json
+
+        import httpx
+
+        config = config or GenerationConfig()
+        options = {"temperature": config.temperature, "num_predict": config.max_tokens}
+        if config.stop_sequences:
+            options["stop"] = config.stop_sequences
+        payload = {
+            "model": self._model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "stream": True, "options": options,
+        }
+        async with (
+            httpx.AsyncClient(timeout=120.0) as client,
+            client.stream("POST", f"{self._base_url}/api/chat", json=payload) as response,
+        ):
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.strip():
+                    continue
+                data = json.loads(line)
+                if data.get("error"):
+                    raise RuntimeError("Ollama could not finish generating the answer.")
+                text = data.get("message", {}).get("content", "")
+                if text:
+                    yield text
+                if data.get("done"):
+                    return
+            raise RuntimeError("Ollama's response was interrupted.")
 
     async def generate(
         self,
@@ -181,6 +224,25 @@ class AnthropicProvider(LLMProvider):
         self._client = anthropic.Anthropic(api_key=api_key)
         self._async_client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model
+
+    async def stream(
+        self, messages: list[Message], config: GenerationConfig | None = None,
+    ) -> AsyncIterator[str]:
+        config = config or GenerationConfig()
+        kwargs: dict = {
+            "model": self._model, "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+            "messages": [{"role": m.role, "content": m.content}
+                         for m in messages if m.role != "system"],
+        }
+        system = next((m.content for m in reversed(messages) if m.role == "system"), None)
+        if system:
+            kwargs["system"] = system
+        if config.stop_sequences:
+            kwargs["stop_sequences"] = config.stop_sequences
+        async with self._async_client.messages.stream(**kwargs) as response:
+            async for text in response.text_stream:
+                yield text
 
     async def generate(
         self,
@@ -278,6 +340,23 @@ class OpenAIProvider(LLMProvider):
         self._client = openai.OpenAI(api_key=api_key)
         self._async_client = openai.AsyncOpenAI(api_key=api_key)
         self._model = model
+
+    async def stream(
+        self, messages: list[Message], config: GenerationConfig | None = None,
+    ) -> AsyncIterator[str]:
+        config = config or GenerationConfig()
+        response = await self._async_client.chat.completions.create(
+            model=self._model,
+            messages=[{"role": m.role, "content": m.content} for m in messages],
+            temperature=config.temperature, max_tokens=config.max_tokens,
+            stop=config.stop_sequences or None, stream=True,
+        )
+        try:
+            async for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        finally:
+            await response.close()
 
     async def generate(
         self,

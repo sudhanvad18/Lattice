@@ -10,7 +10,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function fetchResponse(path: string, options?: RequestInit): Promise<Response> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...options });
   if (!res.ok) {
     let code: string | undefined;
@@ -27,7 +27,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     } catch { /* ignore parse errors */ }
     throw new ApiError(res.status, path, message, code);
   }
-  return res.json() as Promise<T>;
+  return res;
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  return (await fetchResponse(path, options)).json() as Promise<T>;
 }
 
 // --- Task types ---
@@ -296,6 +300,63 @@ export function chatQuery(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, history }),
   });
+}
+
+export type ChatStreamEvent =
+  | { event: "status"; data: { message: string } }
+  | { event: "sources"; data: { citations: ChatCitation[] } }
+  | { event: "delta"; data: { text: string } }
+  | { event: "done"; data: ChatResponse };
+
+export async function streamChat(
+  message: string,
+  history: { role: string; content: string }[],
+  onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetchResponse("/chat/stream", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, history }), signal,
+  });
+  if (!res.body) throw new Error("The answer stream is unavailable. Please try again.");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let completed = false;
+  const dispatch = (frame: string) => {
+    const lines = frame.split("\n");
+    const event = lines.find((line) => line.startsWith("event:"))?.slice(6).trim();
+    const payload = lines.filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart()).join("\n");
+    if (!payload) return;
+    const data = JSON.parse(payload);
+    if (event === "error") throw new Error(data.message || "Could not get an answer.");
+    if (event === "status" || event === "sources" || event === "delta" || event === "done") {
+      onEvent({ event, data } as ChatStreamEvent);
+      if (event === "done") completed = true;
+    }
+  };
+  try {
+    while (!completed) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      buffer = buffer.replace(/\r\n/g, "\n");
+      let boundary: number;
+      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+        dispatch(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+        if (completed) break;
+      }
+      if (done) {
+        if (!completed && buffer.trim()) dispatch(buffer);
+        if (!completed) throw new Error("The answer stream was interrupted. Please try again.");
+        break;
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }
 
 // --- Graph fetchers ---

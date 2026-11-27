@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
 from starlette.concurrency import run_in_threadpool
@@ -94,13 +95,12 @@ def build_chat_answer(kb: Retriever, message: str, top_k: int = 5) -> tuple[str,
     return "\n\n".join(sections), citations
 
 
-async def answer_question(
+async def _prepare_answer(
     kb: Any,
-    provider: LLMProvider,
     message: str,
     history: list[ChatTurn],
-) -> ChatResponse:
-    """Generate a grounded answer from the knowledge base using the model."""
+) -> tuple[list[ChatCitation], list[Message]]:
+    """Retrieve full passages and prepare the common grounded prompt."""
 
     def _retrieve() -> tuple[list[Any], list[Any], dict[str, str]]:
         chunks = list(kb.vector_search(message, top_k=6) or [])
@@ -131,11 +131,7 @@ async def answer_question(
     chunks, entities, entity_summaries = await run_in_threadpool(_retrieve)
 
     if not chunks and not entities:
-        return ChatResponse(
-            mode="answer",
-            response=_NO_COVERAGE_ANSWER,
-            citations=[],
-        )
+        return [], []
 
     # Build numbered sources: chunks first, then entities
     sources: list[ChatCitation] = []
@@ -184,29 +180,88 @@ async def answer_question(
         messages.append(Message(role=turn.role, content=turn.content))
     messages.append(Message(role="user", content=user_content))
 
-    config = GenerationConfig(temperature=0.2, max_tokens=700)
+    return sources, messages
 
-    try:
-        result = await provider.generate(messages, config)
-        answer = result.content
-    except Exception as exc:
-        notice = (
-            friendly_provider_error(exc)
-            or "The model failed to answer; showing retrieved passages."
-        )
-        return ChatResponse(
-            mode="retrieval_only",
-            response=_format_sources_text(sources),
-            citations=sources,
-            notice=notice,
-        )
 
-    # Return only citations actually referenced in the answer
+def _final_answer(
+    answer: str, sources: list[ChatCitation], notice: str | None = None,
+) -> ChatResponse:
     raw_refs = re.findall(r"\[(\d+)\]", answer)
     cited_indices = {int(r) for r in raw_refs if 1 <= int(r) <= len(sources)}
     cited = [sources[i - 1] for i in sorted(cited_indices)] if cited_indices else sources
+    return ChatResponse(mode="answer", response=answer, citations=cited, notice=notice)
 
-    return ChatResponse(mode="answer", response=answer, citations=cited)
+
+def _retrieval_fallback(sources: list[ChatCitation], notice: str) -> ChatResponse:
+    return ChatResponse(
+        mode="retrieval_only", response=_format_sources_text(sources),
+        citations=sources, notice=notice,
+    )
+
+
+async def answer_question(
+    kb: Any, provider: LLMProvider, message: str, history: list[ChatTurn],
+) -> ChatResponse:
+    """Generate the existing, non-streaming grounded answer."""
+    sources, messages = await _prepare_answer(kb, message, history)
+    if not sources:
+        return ChatResponse(response=_NO_COVERAGE_ANSWER)
+    try:
+        result = await provider.generate(
+            messages, GenerationConfig(temperature=0.2, max_tokens=700),
+        )
+    except Exception as exc:
+        return _retrieval_fallback(
+            sources, friendly_provider_error(exc)
+            or "The model failed to answer; showing retrieved passages.",
+        )
+    return _final_answer(result.content, sources)
+
+
+async def stream_answer(
+    kb: Any, provider: LLMProvider | None, message: str, history: list[ChatTurn],
+    provider_notice: str | None = None,
+) -> AsyncIterator[tuple[str, dict]]:
+    """Stream progress, source metadata, text deltas, then an authoritative final response."""
+    yield "status", {"message": "Searching knowledge base…"}
+    try:
+        sources, messages = await _prepare_answer(kb, message, history)
+    except Exception:
+        yield "error", {"message": "Knowledge base retrieval failed. Please try again."}
+        return
+    if not sources:
+        yield "done", ChatResponse(response=_NO_COVERAGE_ANSWER).model_dump()
+        return
+    yield "sources", {"citations": [s.model_dump() for s in sources]}
+    if provider is None:
+        yield "done", _retrieval_fallback(
+            sources, provider_notice or "The model is unavailable; showing retrieved passages.",
+        ).model_dump()
+        return
+    yield "status", {"message": "Generating answer…"}
+    parts: list[str] = []
+    try:
+        config = GenerationConfig(temperature=0.2, max_tokens=700)
+        async for text in provider.stream(messages, config):
+            if text:
+                parts.append(text)
+                yield "delta", {"text": text}
+        if not parts:
+            raise RuntimeError("Empty model response")
+    except Exception as exc:
+        if parts:
+            result = _final_answer(
+                "".join(parts), sources,
+                "The answer was interrupted. This is a partial response; please try again.",
+            )
+        else:
+            result = _retrieval_fallback(
+                sources, friendly_provider_error(exc)
+                or "The model failed to answer; showing retrieved passages.",
+            )
+        yield "done", result.model_dump()
+        return
+    yield "done", _final_answer("".join(parts), sources).model_dump()
 
 
 def _format_sources_text(sources: list[ChatCitation]) -> str:
