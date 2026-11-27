@@ -2,6 +2,7 @@
 
 import asyncio
 
+import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -301,3 +302,26 @@ async def test_live_progress_and_partial_draft_after_blank_review_timeout(monkey
     assert events[-1] == "error" and "task_complete" not in events
     assert socket.sent[-1]["data"]["message"] == failed["errors"][0]
     assert all(event["data"]["agent"] and event["data"]["message"] for event in socket.sent[1:-1])
+
+
+@pytest.mark.parametrize("message", ["The handler is closed", "Unexpected application failure"])
+async def test_closed_socket_cleanup_preserves_other_errors(monkeypatch, message):
+
+    manager = TaskManager(provider=MockProvider())
+    manager.emit("task", "task_created", {"task": "test"})
+    monkeypatch.setattr("lattice_api.app.get_task_manager", lambda: manager)
+
+    class Socket:
+        async def accept(self):
+            pass
+
+        async def send_json(self, record):
+            raise RuntimeError(message)
+
+    if "closed" in message:
+        await _stream_task_events(Socket(), "task")
+    else:
+        with pytest.raises(RuntimeError, match="Unexpected application failure"):
+            await _stream_task_events(Socket(), "task")
+    assert not manager._event_callbacks
+

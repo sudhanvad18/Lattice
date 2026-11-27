@@ -131,6 +131,11 @@ async def _stream_task_events(websocket: WebSocket, task_id: str | None) -> None
                 return
     except WebSocketDisconnect:
         pass
+    except RuntimeError as exc:
+        # Some transports report a peer closing during a send as RuntimeError
+        # instead of WebSocketDisconnect. Always release its event subscription.
+        if not any(text in str(exc).lower() for text in ("closed", "websocket.close")):
+            raise
     finally:
         tm.off_event(handler)
 
