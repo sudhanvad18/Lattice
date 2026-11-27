@@ -113,12 +113,16 @@ export default function Dashboard() {
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
+        <div hidden={activeView !== "ask"} className="h-full">
+          <ViewErrorBoundary label="Ask">
+            <AskView onNavigateToKB={() => setView("kb")} />
+          </ViewErrorBoundary>
+        </div>
         <ViewErrorBoundary
           key={activeView}
           label={NAV_ITEMS.find((item) => item.id === activeView)?.label ?? activeView}
         >
           {activeView === "kb" && <KnowledgeBaseView />}
-          {activeView === "ask" && <AskView onNavigateToKB={() => setView("kb")} />}
           {activeView === "activity" && <ActivityFeed />}
           {activeView === "graph" && <KnowledgeGraphView />}
           {activeView === "eval" && <EvalDashboard />}
