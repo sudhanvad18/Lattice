@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore } from "react";
 import {
   Send,
   Loader2,
@@ -14,6 +14,7 @@ import {
 import {
   streamChat,
   submitTask,
+  getTask,
   getTaskResult,
   createWebSocket,
   normalizeAgentEvent,
@@ -42,22 +43,167 @@ interface AgentRun {
   taskId: string;
   events: AgentEvent[];
   status: "running" | "done" | "error";
-  artifact?: Artifact;
+  artifacts?: Artifact[];
+  progress?: string;
+  resultPending?: boolean;
   errorMessage?: string;
 }
 
-export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
+interface Conversation {
+  mode: AskMode;
+  approvalMode: string;
+  input: string;
+  messages: ConversationMessage[];
+}
+
+const storageKey = "lattice.ask.v1";
+const storageLimit = 1_000_000;
+const messageLimit = 100;
+const eventLimit = 200; // Retain the full server replay window for deduplication.
+const emptyConversation: Conversation = {
+  mode: "answer", approvalMode: "on_low_confidence", input: "", messages: [],
+};
+
+function record(x: unknown): x is Record<string, unknown> {
+  return x !== null && typeof x === "object" && !Array.isArray(x);
+}
+
+function citation(x: unknown): x is ChatCitation {
+  return record(x) && Number.isInteger(x.index) && (x.kind === "chunk" || x.kind === "entity")
+    && typeof x.id === "string" && typeof x.source === "string" && typeof x.snippet === "string";
+}
+
+function artifact(x: unknown): x is Artifact {
+  return record(x) && typeof x.content === "string" && typeof x.artifact_type === "string"
+    && typeof x.id === "string" && typeof x.source_agent === "string"
+    && typeof x.created_at === "string" && typeof x.confidence === "number"
+    && Array.isArray(x.citations) && x.citations.every((id) => typeof id === "string");
+}
+
+function restoreMessage(x: unknown): ConversationMessage[] {
+  if (!record(x) || (x.role !== "user" && x.role !== "assistant") || typeof x.content !== "string"
+    || typeof x.timestamp !== "string" || !Number.isFinite(Date.parse(x.timestamp))) return [];
+  const message: ConversationMessage = {
+    role: x.role, content: x.content, timestamp: new Date(x.timestamp),
+    citations: Array.isArray(x.citations) ? x.citations.filter(citation) : undefined,
+    notice: x.streaming === true ? "Answer interrupted by page reload. You can ask again."
+      : typeof x.notice === "string" ? x.notice : undefined,
+    chatMode: typeof x.chatMode === "string" ? x.chatMode : undefined,
+  };
+  if (x.agentRun !== undefined) {
+    const run = x.agentRun;
+    if (x.role !== "assistant" || !record(run) || typeof run.taskId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(run.taskId)
+      || (run.status !== "running" && run.status !== "done" && run.status !== "error")) return [];
+    message.agentRun = {
+      taskId: run.taskId, status: run.status, resultPending: run.resultPending === true,
+      events: Array.isArray(run.events) ? run.events.slice(-eventLimit).flatMap((raw) => {
+        const event = normalizeAgentEvent(raw, run.taskId as string);
+        return event && event.task_id === run.taskId ? [event] : [];
+      }) : [],
+      artifacts: Array.isArray(run.artifacts) ? run.artifacts.filter(artifact) : undefined,
+      errorMessage: typeof run.errorMessage === "string" ? run.errorMessage : undefined,
+    };
+  }
+  return [message];
+}
+
+function readConversation(): Conversation {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw || raw.length > storageLimit) return emptyConversation;
+    const data: unknown = JSON.parse(raw);
+    if (!record(data) || !Array.isArray(data.messages)) return emptyConversation;
+    const seen = new Set<string>();
+    const messages = data.messages.slice(-messageLimit).flatMap(restoreMessage).filter((message) => {
+      const id = message.agentRun?.taskId;
+      if (!id) return true;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    return {
+      mode: data.mode === "agent" ? "agent" : "answer",
+      approvalMode: data.approvalMode === "always" || data.approvalMode === "never"
+        ? data.approvalMode : "on_low_confidence",
+      input: typeof data.input === "string" ? data.input : "",
+      messages,
+    };
+  } catch {
+    return emptyConversation;
+  }
+}
+
+function saveConversation(state: Conversation) {
+  try {
+    const snapshot = { ...state, input: state.input.slice(0, 64_000), messages: [] as ConversationMessage[] };
+    let remaining = storageLimit - JSON.stringify(snapshot).length;
+    // Reserve room for recoverable task IDs before filling the remaining space
+    // with recent messages. Restore the original conversation order afterward.
+    const recent = state.messages.map((message, index) => ({ message, index })).reverse();
+    const pending = (m: ConversationMessage) => m.agentRun?.status === "running" || m.agentRun?.resultPending;
+    const active = recent.filter(({ message }) => pending(message)).slice(0, messageLimit);
+    const ordered = [...active, ...recent.filter(({ message }) => !pending(message)).slice(0, messageLimit)];
+    const activeBudget = Math.floor(remaining / Math.max(active.length, 1));
+    const saved: typeof recent = [];
+    for (const row of ordered) {
+      if (saved.length >= messageLimit) break;
+      let message = row.message;
+      let size = JSON.stringify(message).length + 1;
+      if (size > (pending(message) ? activeBudget : remaining)) {
+        if (message.agentRun) {
+          message = { ...message, agentRun: { ...message.agentRun, events: [], artifacts: undefined,
+            resultPending: message.agentRun.status !== "running" } };
+        } else {
+          message = { ...message, content: message.content.slice(0, 100_000), citations: [],
+            notice: "This message exceeded the local history limit." };
+        }
+        size = JSON.stringify(message).length + 1;
+        if (size > remaining) continue;
+      }
+      saved.push({ index: row.index, message });
+      remaining -= size;
+    }
+    snapshot.messages = saved.sort((a, b) => a.index - b.index).map((row) => row.message);
+    localStorage.setItem(storageKey, JSON.stringify(snapshot));
+  } catch { /* Storage may be disabled or full. Keep the live conversation. */ }
+}
+
+const subscribeToHydration = () => () => {};
+export function AskView(props: { onNavigateToKB: () => void }) {
+  const hydrated = useSyncExternalStore(subscribeToHydration, () => true, () => false);
+  return hydrated ? <AskConversation {...props} /> : null;
+}
+
+function AskConversation({ onNavigateToKB }: { onNavigateToKB: () => void }) {
   const { kb, health, apiReachable } = useKB();
-  const [mode, setMode] = useState<AskMode>("answer");
-  const [approvalMode, setApprovalMode] = useState("on_low_confidence");
-  const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [initial] = useState(readConversation);
+  const [mode, setMode] = useState<AskMode>(initial.mode);
+  const [approvalMode, setApprovalMode] = useState(initial.approvalMode);
+  const [input, setInput] = useState(initial.input);
+  const [messages, setMessages] = useState(initial.messages);
+  const pendingSave = useRef<Conversation | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const flush = useCallback(() => {
+    clearTimeout(saveTimer.current);
+    saveTimer.current = undefined;
+    if (pendingSave.current) saveConversation(pendingSave.current);
+    pendingSave.current = null;
+  }, []);
+  useEffect(() => {
+    pendingSave.current = { mode, approvalMode, input, messages };
+    saveTimer.current ??= setTimeout(flush, 300);
+  }, [mode, approvalMode, input, messages, flush]);
+  useEffect(() => {
+    window.addEventListener("pagehide", flush);
+    return () => { window.removeEventListener("pagehide", flush); flush(); };
+  }, [flush]);
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const answerController = useRef<AbortController | null>(null);
   const followAnswer = useRef(true);
 
-  useEffect(() => () => answerController.current?.abort(), []);
+  const submission = useRef<AbortController | null>(null);
+  useEffect(() => () => { answerController.current?.abort(); submission.current?.abort(); }, []);
 
   const kbReady = kb?.ready ?? false;
   const modelReachable = apiReachable && !!health && !!health.provider?.reachable;
@@ -120,97 +266,40 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
   // --- Agent team mode ---
 
   const sendAgentTask = useCallback(async (userMessage: string) => {
-    let taskId = "";
+    const controller = new AbortController();
+    submission.current = controller;
     try {
-      const task = await submitTask(userMessage, approvalMode);
-      taskId = task.task_id;
+      const task = await submitTask(userMessage, approvalMode, controller.signal);
+      if (!controller.signal.aborted) setMessages((prev) => [...prev, {
+        role: "assistant", content: "", timestamp: new Date(),
+        agentRun: { taskId: task.task_id, events: [], status: "running" },
+      }]);
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: err instanceof Error ? err.message : "Failed to submit task.",
-          timestamp: new Date(),
-        },
-      ]);
+      if (!controller.signal.aborted) setMessages((prev) => [...prev, {
+        role: "assistant", timestamp: new Date(),
+        content: err instanceof Error ? err.message : "Failed to submit task.",
+      }]);
+    } finally {
+      submission.current = null;
       setLoading(false);
-      return;
     }
-
-    const runState: AgentRun = { taskId, events: [], status: "running" };
-
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "assistant",
-        content: "",
-        agentRun: runState,
-        timestamp: new Date(),
-      },
-    ]);
-    setLoading(false);
-
-    const ws = createWebSocket(taskId);
-
-    ws.onmessage = (event) => {
-      try {
-        const data = normalizeAgentEvent(JSON.parse(event.data as string), taskId);
-        if (!data) return;
-
-        setMessages((prev) => {
-          const idx = prev.findLastIndex((m) => m.agentRun?.taskId === taskId);
-          if (idx === -1) return prev;
-          const updated = { ...prev[idx] };
-          const run: AgentRun = { ...updated.agentRun!, events: [...updated.agentRun!.events, data] };
-          if (data.event_type === "completed") run.status = "done";
-          if (data.event_type === "error") {
-            run.status = "error";
-            run.errorMessage = data.details;
-          }
-          updated.agentRun = run;
-          return [...prev.slice(0, idx), updated, ...prev.slice(idx + 1)];
-        });
-
-        if (data.event_type === "completed") {
-          ws.close();
-          getTaskResult(taskId)
-            .then((result) => {
-              const artifact =
-                result.artifacts.find((a) => a.artifact_type === "document") ??
-                result.artifacts[result.artifacts.length - 1];
-              setMessages((prev) => {
-                const idx = prev.findLastIndex((m) => m.agentRun?.taskId === taskId);
-                if (idx === -1) return prev;
-                const updated = { ...prev[idx] };
-                updated.agentRun = { ...updated.agentRun!, status: "done", artifact };
-                return [...prev.slice(0, idx), updated, ...prev.slice(idx + 1)];
-              });
-            })
-            .catch(() => { /* artifact display is best-effort */ });
-        }
-        if (data.event_type === "error") ws.close();
-      } catch { /* ignore */ }
-    };
-
-    ws.onclose = () => {
-      setMessages((prev) => {
-        const idx = prev.findLastIndex((m) => m.agentRun?.taskId === taskId);
-        if (idx === -1) return prev;
-        if (prev[idx].agentRun?.status === "running") {
-          const updated = { ...prev[idx] };
-          updated.agentRun = { ...updated.agentRun!, status: "done" };
-          return [...prev.slice(0, idx), updated, ...prev.slice(idx + 1)];
-        }
-        return prev;
-      });
-    };
   }, [approvalMode]);
+
+  const updateRun = useCallback((taskId: string, change: (run: AgentRun) => AgentRun) => {
+    setMessages((prev) => {
+      const index = prev.findIndex((m) => m.agentRun?.taskId === taskId);
+      const run = prev[index]?.agentRun;
+      if (!run) return prev;
+      const next = change(run);
+      return next === run ? prev : prev.with(index, { ...prev[index], agentRun: next });
+    });
+  }, []);
 
   const handleSend = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
       const text = input.trim();
-      if (!text || loading || answerController.current) return;
+      if (!text || loading || answerController.current || submission.current || (mode === "agent" && !modelReachable)) return;
 
       setMessages((prev) => [...prev, { role: "user", content: text, timestamp: new Date() }]);
       setInput("");
@@ -225,7 +314,7 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
         // loading is set false inside sendAgentTask after task is submitted
       }
     },
-    [input, loading, mode, sendAnswer, sendAgentTask],
+    [input, loading, mode, modelReachable, sendAnswer, sendAgentTask],
   );
 
   // --- Render ---
@@ -239,7 +328,8 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
         <div>
           <h1 className="text-2xl font-bold">Ask</h1>
           <p className="text-zinc-400 text-sm mt-1">
-            Query your knowledge base or launch the agent team.
+            {mode === "agent" ? "The agent team uses your current knowledge base for evidence."
+              : "Query your knowledge base or launch the agent team."}
           </p>
         </div>
         <div className="flex bg-zinc-800 rounded-lg p-0.5" role="group">
@@ -293,7 +383,7 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
         )}
 
         {messages.map((msg, i) => (
-          <MessageBubble key={i} msg={msg} />
+          <MessageBubble key={msg.agentRun?.taskId ?? i} msg={msg} updateRun={updateRun} />
         ))}
 
 
@@ -355,7 +445,7 @@ export function AskView({ onNavigateToKB }: { onNavigateToKB: () => void }) {
                 )}
                 <button
                   type="submit"
-                  disabled={loading || !input.trim()}
+                  disabled={loading || !input.trim() || (mode === "agent" && !modelReachable)}
                   className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white rounded-lg text-sm font-medium transition-colors"
                 >
                   {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
@@ -403,7 +493,9 @@ function ModeButton({
   );
 }
 
-function MessageBubble({ msg }: { msg: ConversationMessage }) {
+type UpdateRun = (id: string, change: (run: AgentRun) => AgentRun) => void;
+
+function MessageBubble({ msg, updateRun }: { msg: ConversationMessage; updateRun: UpdateRun }) {
   const [expandedCitation, setExpandedCitation] = useState<number | null>(null);
 
   if (msg.role === "user") {
@@ -421,7 +513,7 @@ function MessageBubble({ msg }: { msg: ConversationMessage }) {
 
   // Assistant: agent run
   if (msg.agentRun) {
-    return <AgentRunBubble run={msg.agentRun} timestamp={msg.timestamp} />;
+    return <AgentRunBubble updateRun={updateRun} run={msg.agentRun} timestamp={msg.timestamp} />;
   }
 
   // Assistant: answer
@@ -508,8 +600,138 @@ function AnswerText({
   );
 }
 
-function AgentRunBubble({ run, timestamp }: { run: AgentRun; timestamp: Date }) {
+function terminalStatus(status?: string) {
+  if (status === "completed") return "done";
+  if (status === "failed" || status === "rejected") return "error";
+}
+
+function monitorTask(initial: AgentRun, update: UpdateRun, pause: (reason: string) => void) {
+  const id = initial.taskId;
+  const controller = new AbortController();
+  let socket: WebSocket | undefined;
+  let timer: ReturnType<typeof setTimeout>;
+  let busy = false;
+  let wake = false;
+  let stopped = false;
+  let failures = 0;
+  let connections = 0;
+  let terminal = initial.status === "running" ? undefined : initial.status;
+  let terminalError = initial.errorMessage ?? "";
+
+  function markTerminal() {
+    if (!terminal) return;
+    const status = terminal;
+    update(id, (run) => ({ ...run, status, resultPending: true,
+      errorMessage: status === "error" ? terminalError || "The agent task failed." : undefined }));
+  }
+  function disconnect() {
+    if (!socket) return;
+    socket.onmessage = socket.onclose = socket.onerror = null;
+    socket.close();
+    socket = undefined;
+  }
+  function stop() {
+    stopped = true;
+    clearTimeout(timer);
+    controller.abort();
+    disconnect();
+  }
+  function schedule(delay: number) {
+    if (stopped) return;
+    clearTimeout(timer);
+    if (busy) wake = true;
+    else timer = setTimeout(reconcile, delay);
+  }
+  function connect() {
+    // The server replays its event log on connection. After three attempts,
+    // continue with authoritative status polling alone.
+    if (connections >= 3 || socket || terminal) return;
+    connections++;
+    try { socket = createWebSocket(id); } catch { return; }
+    socket.onclose = () => { socket = undefined; schedule(0); };
+    socket.onerror = () => socket?.close();
+    socket.onmessage = ({ data }) => {
+      let raw;
+      try { raw = JSON.parse(data); } catch { return; }
+      const event = normalizeAgentEvent(raw, id);
+      if (!event || event.task_id !== id) return;
+      update(id, (run) => {
+        if (run.events.some((e) => e.timestamp === event.timestamp && e.agent === event.agent
+          && e.event_type === event.event_type && e.details === event.details)) return run;
+        return { ...run, events: [...run.events, event].slice(-eventLimit), progress: event.details };
+      });
+      if (raw.event === "task_complete" || raw.event === "error") {
+        terminal = raw.event === "error" ? "error" : "done";
+        if (terminal === "error") terminalError = event.details;
+        markTerminal();
+        disconnect();
+        schedule(0);
+      }
+    };
+  }
+
+  async function reconcile() {
+    busy = true;
+    wake = false;
+    // Bound each request even if the API accepts a connection and goes silent.
+    const signal = () => AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]);
+    try {
+      const task = await getTask(id, signal()).catch((error) => {
+        if (!terminal) throw error;
+        return undefined;
+      });
+      if (stopped) return;
+      terminal = terminalStatus(task?.status) ?? terminal;
+      terminalError = task?.errors?.filter((s) => s.trim()).join("\n") || terminalError;
+      if (terminal) {
+        markTerminal();
+        disconnect();
+        const result = await getTaskResult(id, signal());
+        if (stopped) return;
+        const status = terminalStatus(result.status) ?? terminal;
+        const errorMessage = result.errors?.filter((s) => s.trim()).join("\n") || terminalError
+          || "The agent task failed without an error description.";
+        update(id, (run) => ({ ...run, status, resultPending: false, artifacts: result.artifacts,
+          errorMessage: status === "error" ? errorMessage : undefined }));
+        stop();
+      } else {
+        if (task?.current_agent) {
+          const progress = [task.current_agent, task.iteration_count != null && `iteration ${task.iteration_count}`]
+            .filter(Boolean).join(" · ");
+          update(id, (run) => run.progress === progress ? run : { ...run, progress });
+        }
+        connect();
+      }
+      failures = 0;
+    } catch (error) {
+      if (stopped) return;
+      if (++failures >= 5) {
+        stop();
+        const detail = error instanceof Error ? error.message : "API unavailable";
+        pause([terminalError, `Could not load task ${terminal ? "result" : "status"} (${detail}).`]
+          .filter(Boolean).join(" "));
+      }
+    } finally {
+      busy = false;
+      schedule(wake ? 0 : Math.min(30_000, 3000 * 2 ** failures));
+    }
+  }
+
+  timer = setTimeout(() => { connect(); void reconcile(); }, 0);
+  return stop;
+}
+
+function AgentRunBubble({ run, timestamp, updateRun }: {
+  run: AgentRun; timestamp: Date; updateRun: UpdateRun;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [monitorError, setMonitorError] = useState("");
+  const monitoring = run.status === "running" || run.resultPending === true;
+  const startMonitor = useEffectEvent(() => monitorTask(run, updateRun, setMonitorError));
+  useEffect(() => {
+    if (monitoring) return startMonitor();
+  }, [run.taskId, monitoring, attempt]);
 
   return (
     <div className="flex justify-start">
@@ -529,7 +751,7 @@ function AgentRunBubble({ run, timestamp }: { run: AgentRun; timestamp: Date }) 
             )}
             <span className="text-zinc-300">
               {run.status === "running"
-                ? "Agent team running..."
+                ? monitorError ? "Task monitoring paused" : "Agent team running..."
                 : run.status === "error"
                   ? "Agent team failed"
                   : "Agent team complete"}
@@ -541,6 +763,17 @@ function AgentRunBubble({ run, timestamp }: { run: AgentRun; timestamp: Date }) 
             {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
           </div>
         </button>
+
+        {monitorError && (
+          <div className="border-t border-zinc-800 px-4 py-2 text-xs text-amber-300">
+            {monitorError} <button className="underline" onClick={() => {
+              setMonitorError(""); setAttempt((n) => n + 1);
+            }}>Retry monitoring</button>
+          </div>
+        )}
+        {run.status === "running" && run.progress && (
+          <p className="px-4 pb-2 text-xs text-zinc-400">{run.progress}</p>
+        )}
 
         {/* Steps */}
         {expanded && run.events.length > 0 && (
@@ -575,19 +808,19 @@ function AgentRunBubble({ run, timestamp }: { run: AgentRun; timestamp: Date }) 
         )}
 
         {/* Final artifact */}
-        {run.artifact && (
-          <div className="border-t border-zinc-800 p-4">
+        {run.artifacts?.map((artifact) => (
+          <div key={artifact.id} className="border-t border-zinc-800 p-4">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-zinc-500 capitalize">{run.artifact.artifact_type}</span>
+              <span className="text-xs text-zinc-500 capitalize">{artifact.artifact_type}</span>
               <span className="text-xs text-zinc-500">
-                confidence: {(run.artifact.confidence * 100).toFixed(0)}%
+                confidence: {(artifact.confidence * 100).toFixed(0)}%
               </span>
             </div>
             <pre className="text-sm text-zinc-300 whitespace-pre-wrap font-mono leading-relaxed bg-zinc-950 rounded-lg p-3 max-h-64 overflow-y-auto scrollbar-thin">
-              {run.artifact.content}
+              {artifact.content}
             </pre>
           </div>
-        )}
+        ))}
 
         <div className="px-4 pb-2">
           <span className="text-xs text-zinc-600">{timestamp.toLocaleTimeString()}</span>

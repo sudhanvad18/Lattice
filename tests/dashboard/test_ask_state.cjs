@@ -1,0 +1,182 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const dashboard = path.resolve(__dirname, "../../packages/dashboard");
+const ts = require(path.join(dashboard, "node_modules/typescript"));
+
+// Exercise the same storage and monitoring functions used by Ask, without a DOM.
+function compile(file, extra = "") {
+  const source = readFileSync(path.join(dashboard, "src", file), "utf8") + extra;
+  return ts.transpileModule(source, { compilerOptions: {
+    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
+  } }).outputText;
+}
+const apiCode = compile("lib/api.ts");
+const askCode = compile("components/ask.tsx", "\nexport { readConversation, saveConversation, monitorTask };");
+function runtime(options = {}) {
+  const api = {};
+  vm.runInNewContext(apiCode, { exports: api, process: { env: {} } });
+  const apiOverrides = options.api;
+  const exports = {};
+  vm.runInNewContext(askCode, {
+    exports, require: (name) => name === "@/lib/api" ? { ...api, ...apiOverrides } : {},
+    Error, AbortController, AbortSignal, setTimeout, clearTimeout, ...options,
+  });
+  return exports;
+}
+
+test("round-trip restores partial Answer, citations, mode, draft and task ID", () => {
+  let raw;
+  const api = runtime({ localStorage: { getItem: () => raw, setItem: (_, value) => { raw = value; } } });
+  const citation = { index: 1, kind: "chunk", id: "src", source: "README", snippet: "contents" };
+  const message = { role: "assistant", timestamp: new Date(), streaming: true,
+    content: "Partial [1]", citations: [citation, null] };
+  api.saveConversation({ mode: "agent", input: "draft", approvalMode: "always", messages: [
+    message, { ...message, streaming: false, agentRun: { taskId: "run-1", status: "running", events: [] } },
+  ] });
+  const restored = api.readConversation();
+  assert.equal(restored.mode, "agent");
+  assert.equal(restored.approvalMode, "always");
+  assert.equal(restored.input, "draft");
+  assert.equal(restored.messages[0].content, message.content);
+  assert.equal(restored.messages[0].citations.length, 1);
+  assert.equal(restored.messages[0].citations[0].source, citation.source);
+  assert.equal(restored.messages[0].timestamp.toISOString(), message.timestamp.toISOString());
+  assert.match(restored.messages[0].notice, /interrupted/i);
+  assert.ok(!restored.messages[0].streaming);
+  assert.equal(restored.messages[1].agentRun.taskId, "run-1");
+  assert.equal(restored.messages[1].agentRun.status, "running");
+});
+
+test("corrupt and unavailable storage degrade safely", () => {
+  for (const raw of ["{", "null", '{"messages":[null,{},{"role":"user","timestamp":false}]}']) {
+    assert.equal(runtime({ localStorage: { getItem: () => raw } }).readConversation().messages.length, 0);
+  }
+  const api = runtime();
+  const state = api.readConversation();
+  assert.equal(state.mode, "answer");
+  assert.doesNotThrow(() => api.saveConversation(state));
+});
+
+function monitor(status) {
+  const timers = new Map();
+  let index = 0;
+  let resultCalls = 0;
+  let statusCalls = 0;
+  let socket;
+  let paused;
+  let run = { taskId: "task", events: [], status: "running" };
+  const api = runtime({
+    setTimeout: (callback) => { timers.set(++index, callback); return index; },
+    clearTimeout: (id) => timers.delete(id),
+    api: {
+      createWebSocket: () => (socket = { close() {} }),
+      getTask: async () => { statusCalls++; return status(); },
+      getTaskResult: () => { resultCalls++; return { artifacts: [{ content: "draft" }] }; },
+    },
+  });
+  const stop = api.monitorTask(run, (_, change) => { run = change(run); }, (err) => { paused = err; });
+  return {
+    get run() { return run; }, get paused() { return paused; },
+    get resultCalls() { return resultCalls; }, get statusCalls() { return statusCalls; },
+    tick() {
+      assert.equal(timers.size, 1);
+      const [key, callback] = timers.entries().next().value;
+      timers.delete(key);
+      callback();
+      return new Promise((resolve) => setImmediate(resolve));
+    },
+    event(event, message) {
+      socket.onmessage({ data: JSON.stringify({ event, timestamp: "2026-11-01T10:00:00Z", data: { message } }) });
+    },
+    close() { socket.onclose(); },
+    stop, timers,
+  };
+}
+
+test("reconnect replay and intermediate completions keep a single running task", async () => {
+  let status = "in_progress";
+  const m = monitor(() => ({ status }));
+  await m.tick();
+  m.event("agent_completed", "Retrieved KB passages");
+  m.close();
+  await m.tick();
+  m.event("agent_completed", "Retrieved KB passages");
+  assert.equal(m.run.events.length, 1);
+  assert.equal(m.run.status, "running");
+  assert.equal(m.resultCalls, 0);
+  status = "completed";
+  await m.tick();
+  assert.equal(m.run.status, "done");
+  assert.equal(m.resultCalls, 1);
+  assert.equal(m.run.artifacts[0].content, "draft");
+  assert.equal(m.timers.size, 0);
+});
+
+test("terminal event during an outstanding poll reconciles errors and partial artifacts once", async () => {
+  let resolveStatus;
+  const m = monitor(() => new Promise((resolve) => { resolveStatus = resolve; }));
+  await m.tick();
+  m.event("error", " ");
+  assert.match(m.run.errorMessage, /failed/i);
+  assert.equal(m.timers.size, 0);
+  resolveStatus({ status: "failed", errors: ["Reviewer unavailable"] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(m.statusCalls, 1);
+  assert.equal(m.resultCalls, 1);
+  assert.equal(m.run.status, "error");
+  assert.equal(m.run.errorMessage, "Reviewer unavailable");
+  assert.equal(m.run.artifacts[0].content, "draft");
+  assert.equal(m.timers.size, 0);
+});
+
+test("monitor backs off and pauses after persistent API failures", async () => {
+  const m = monitor(() => Promise.reject(new Error("offline")));
+  for (let i = 0; i < 5; i++) await m.tick();
+  assert.match(m.paused, /offline/);
+  assert.equal(m.run.status, "running");
+  assert.equal(m.resultCalls, 0);
+  assert.equal(m.timers.size, 0);
+});
+
+test("unmount ignores an in-flight status response", async () => {
+  let resolveStatus;
+  const m = monitor(() => new Promise((resolve) => { resolveStatus = resolve; }));
+  await m.tick();
+  m.stop();
+  resolveStatus({ status: "completed" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(m.resultCalls, 0);
+  assert.equal(m.timers.size, 0);
+});
+
+test("storage bounds preserve an older active task and recent partial answer", () => {
+  let raw;
+  const api = runtime({ localStorage: { getItem: () => raw, setItem: (_, value) => { raw = value; } } });
+  const message = { role: "assistant", content: "", timestamp: new Date() };
+  const messages = [
+    { ...message, agentRun: { taskId: "old", events: [], status: "running" } },
+    ...Array.from({ length: 120 }, (_, i) => ({ ...message, content: String(i) })),
+    { ...message, streaming: true, content: "a".repeat(1_000_000) },
+  ];
+  api.saveConversation({ mode: "answer", approvalMode: "never", input: "draft", messages });
+  assert.ok(raw.length <= 1_000_000);
+  const restored = api.readConversation();
+  assert.equal(restored.messages.length, 100);
+  assert.equal(restored.messages[0].agentRun.taskId, "old");
+  assert.ok(restored.messages.at(-1).content.length > 0);
+  assert.match(restored.messages.at(-1).notice, /interrupted/i);
+});
+
+test("raw task_complete recovers result even if status is temporarily unavailable", async () => {
+  const m = monitor(() => Promise.reject(new Error("offline")));
+  await m.tick();
+  m.event("task_complete", "Finished review");
+  await m.tick();
+  assert.equal(m.run.status, "done");
+  assert.equal(m.resultCalls, 1);
+  assert.equal(m.run.resultPending, false);
+  assert.equal(m.timers.size, 0);
+});

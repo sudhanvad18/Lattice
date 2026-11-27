@@ -19,6 +19,7 @@ async function fetchResponse(path: string, options?: RequestInit): Promise<Respo
       const body = await res.json() as unknown;
       if (body && typeof body === "object" && "detail" in body) {
         const detail = (body as Record<string, unknown>).detail;
+        if (typeof detail === "string" && detail.trim()) message = detail;
         if (detail && typeof detail === "object" && "code" in detail && "message" in detail) {
           code = String((detail as Record<string, unknown>).code);
           message = String((detail as Record<string, unknown>).message);
@@ -55,6 +56,7 @@ export interface TaskResult {
   status: string;
   original_task: string;
   artifacts: Artifact[];
+  errors?: string[];
   reviews?: Record<string, unknown>[];
   iteration_count?: number;
 }
@@ -225,11 +227,11 @@ export interface Communities {
 
 // --- Task fetchers ---
 
-export function submitTask(task: string, approvalMode: string = "on_low_confidence"): Promise<Task> {
+export function submitTask(task: string, approvalMode: string = "on_low_confidence", signal?: AbortSignal): Promise<Task> {
   return request("/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task, approval_mode: approvalMode }),
+    body: JSON.stringify({ task, approval_mode: approvalMode }), signal,
   });
 }
 
@@ -237,12 +239,12 @@ export function getTasks(): Promise<Task[]> {
   return request("/tasks");
 }
 
-export function getTask(id: string): Promise<Task> {
-  return request(`/tasks/${id}`);
+export function getTask(id: string, signal?: AbortSignal): Promise<Task> {
+  return request(`/tasks/${encodeURIComponent(id)}`, { signal });
 }
 
-export function getTaskResult(id: string): Promise<TaskResult> {
-  return request(`/tasks/${id}/result`);
+export function getTaskResult(id: string, signal?: AbortSignal): Promise<TaskResult> {
+  return request(`/tasks/${encodeURIComponent(id)}/result`, { signal });
 }
 
 export function getAuditTrail(taskId: string): Promise<AgentEvent[]> {
@@ -453,6 +455,8 @@ function mapEventType(event: string): AgentEvent["event_type"] {
 }
 
 function describeEvent(event: string, data: Record<string, unknown>): string {
+  if (event === "error") return typeof data.message === "string" && data.message.trim()
+    ? data.message : "The agent task failed without an error description.";
   if (typeof data.summary === "string" && data.summary) return data.summary;
 
   // KB ingest events
@@ -493,9 +497,6 @@ function describeEvent(event: string, data: Record<string, unknown>): string {
     const artifacts = typeof data.artifacts === "number" ? data.artifacts : 0;
     return `Task ${status} (${artifacts} artifacts)`;
   }
-
-  // Show error data.message for error events
-  if (event === "error" && typeof data.message === "string" && data.message) return data.message;
 
   return event.replace(/_/g, " ");
 }
