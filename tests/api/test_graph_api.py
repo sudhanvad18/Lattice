@@ -185,7 +185,8 @@ async def test_task_manager_uses_kb_stores(kb):
         orchestrator.return_value.run = AsyncMock(return_value=state)
         await manager._execute_task(state.task_id, "never")
     researcher.assert_called_once_with(
-        provider=provider, vector_store=kb.vector_store, kg_backend=kb.graph,
+        provider=provider, tool_registry=None,
+        vector_store=kb.vector_store, kg_backend=kb.graph,
     )
 
 

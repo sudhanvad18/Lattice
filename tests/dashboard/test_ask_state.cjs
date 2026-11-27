@@ -14,7 +14,7 @@ function compile(file, extra = "") {
   } }).outputText;
 }
 const apiCode = compile("lib/api.ts");
-const askCode = compile("components/ask.tsx", "\nexport { readConversation, saveConversation, monitorTask };");
+const askCode = compile("components/ask.tsx", "\nexport { readConversation, saveConversation, monitorTask, groupArtifacts };");
 function runtime(options = {}) {
   const api = {};
   vm.runInNewContext(apiCode, { exports: api, process: { env: {} } });
@@ -60,7 +60,7 @@ test("corrupt and unavailable storage degrade safely", () => {
   assert.doesNotThrow(() => api.saveConversation(state));
 });
 
-function monitor(status) {
+function monitor(status, result = () => ({ artifacts: [{ content: "draft" }] })) {
   const timers = new Map();
   let index = 0;
   let resultCalls = 0;
@@ -74,7 +74,7 @@ function monitor(status) {
     api: {
       createWebSocket: () => (socket = { close() {} }),
       getTask: async () => { statusCalls++; return status(); },
-      getTaskResult: () => { resultCalls++; return { artifacts: [{ content: "draft" }] }; },
+      getTaskResult: () => { resultCalls++; return result(); },
     },
   });
   const stop = api.monitorTask(run, (_, change) => { run = change(run); }, (err) => { paused = err; });
@@ -179,4 +179,61 @@ test("raw task_complete recovers result even if status is temporarily unavailabl
   assert.equal(m.resultCalls, 1);
   assert.equal(m.run.resultPending, false);
   assert.equal(m.timers.size, 0);
+});
+
+test("artifacts arrive during the run and polling recovers a missed review event", async () => {
+  let status = "in_progress";
+  let artifacts = [];
+  let reviews = [];
+  const m = monitor(() => ({ status, artifact_count: artifacts.length, review_count: reviews.length }),
+    () => ({ status, artifacts, reviews, errors: status === "completed" ? ["Unresolved integration question"] : [] }));
+  await m.tick();
+  artifacts = [{ id: "research", content: "Found source" }];
+  m.event("artifact_produced", "Produced research");
+  await m.tick();
+  assert.equal(m.run.status, "running");
+  assert.equal(m.run.artifacts[0].content, "Found source");
+  m.event("artifact_produced", "Produced research");
+  await m.tick();
+  assert.equal(m.resultCalls, 1);
+  m.close();
+  artifacts = [...artifacts, { id: "draft", content: "Draft" }];
+  reviews = [{ artifact_id: "draft", approved: false, issues: ["Integration missing"], reasoning: "" }];
+  await m.tick();
+  assert.equal(m.run.reviews[0].approved, false);
+  status = "completed";
+  await m.tick();
+  assert.equal(m.run.errorMessage, "Unresolved integration question");
+  assert.equal(m.run.status, "done");
+  assert.equal(m.timers.size, 0);
+});
+
+test("a terminal event during a partial result fetch reloads the final artifacts", async () => {
+  let finish;
+  let completed = false;
+  const m = monitor(() => ({ status: completed ? "completed" : "in_progress", artifact_count: 1 }),
+    () => completed ? { status: "completed", artifacts: [{ content: "Final draft" }] }
+      : new Promise((resolve) => { finish = resolve; }));
+  await m.tick();
+  completed = true;
+  m.event("task_complete", "Finished");
+  finish({ status: "in_progress", artifacts: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  await m.tick();
+  assert.equal(m.run.artifacts[0].content, "Final draft");
+  assert.equal(m.run.resultPending, false);
+  assert.equal(m.timers.size, 0);
+});
+
+test("group revisions by subtask, support historical query metadata and isolate unknown drafts", () => {
+  const { groupArtifacts } = runtime();
+  const doc = { artifact_type: "document", source_agent: "writer" };
+  const groups = groupArtifacts([
+    { ...doc, id: "1", metadata: { subtask_id: "write", query: "Draft" } },
+    { ...doc, id: "2", metadata: { subtask_id: "write", query: "Revise" } },
+    { ...doc, id: "3", metadata: { query: "POC" } }, { ...doc, id: "4", metadata: { query: "POC" } },
+    { ...doc, id: "5" }, { ...doc, id: "6" },
+  ]);
+  assert.deepEqual(Array.from(groups, (versions) => Array.from(versions, (a) => a.id)),
+    [["1", "2"], ["3", "4"], ["5"], ["6"]]);
 });

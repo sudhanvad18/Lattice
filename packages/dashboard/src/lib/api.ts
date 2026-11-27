@@ -57,8 +57,15 @@ export interface TaskResult {
   original_task: string;
   artifacts: Artifact[];
   errors?: string[];
-  reviews?: Record<string, unknown>[];
+  reviews?: ArtifactReview[];
   iteration_count?: number;
+}
+
+export interface ArtifactReview {
+  artifact_id: string;
+  approved: boolean;
+  issues: string[];
+  reasoning: string;
 }
 
 export interface Artifact {
@@ -66,6 +73,7 @@ export interface Artifact {
   artifact_type: string;
   content: string;
   source_agent: string;
+  metadata?: Record<string, unknown>;
   confidence: number;
   citations: string[];
   created_at: string;

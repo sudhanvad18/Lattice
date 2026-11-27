@@ -53,13 +53,14 @@ class ArtifactResponse(BaseModel):
 
 
 class TaskResultResponse(BaseModel):
-    """Full result of a completed task."""
+    """Latest artifact and review snapshot, including while a task is running."""
 
     task_id: str
     status: str
     original_task: str
     artifacts: list[ArtifactResponse] = Field(default_factory=list)
     reviews: list[dict[str, Any]] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
     write_backs: list[dict[str, Any]] = Field(default_factory=list)
     iteration_count: int = 0
     audit_trail: list[dict[str, Any]] = Field(default_factory=list)

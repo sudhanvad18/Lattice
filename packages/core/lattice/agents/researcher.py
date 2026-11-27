@@ -16,6 +16,7 @@ into a richer research brief.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -24,12 +25,25 @@ import structlog
 
 from lattice.agents.base import BaseAgent
 from lattice.agents.state import AgentRole, AgentState, Artifact
-from lattice.agents.tools import ToolRegistry, ToolResult
+from lattice.agents.tools import ToolRegistry
 from lattice.graph.engine import KnowledgeGraphBackend
 from lattice.inference.provider import LLMProvider
 from lattice.retrieval.vector_store import VectorStore
 
 logger = structlog.get_logger()
+
+
+def implementation_brief(task: str) -> bool:
+    """A single research briefing with an explicitly requested code demonstration."""
+    return bool(re.search(r"\b(?:poc|proof[ -]of[ -]concept)\b", task, re.I)
+                and re.search(r"\b(?:brief(?:ing)?|write[ -]?up)\b", task, re.I))
+
+
+def evidence_context(artifact: Artifact) -> str:
+    return "\n".join(
+        f"[{item['id']}] {item['source']}\n{item['excerpt']}"
+        for item in artifact.metadata.get("evidence", [])
+    )
 
 
 class ResearcherAgent(BaseAgent):
@@ -94,12 +108,13 @@ Be thorough but concise. Return only the requested JSON."""
         # Gather initial context (direct queries for baseline)
         context_parts = []
         citations: list[str] = []
+        evidence = []
 
         if self._vector_store:
             vs_results = self._vector_store.search(query, top_k=self._top_k)
             # Generic design requests often retrieve implementation fragments
             # without the project's purpose. Anchor those requests in its README.
-            if any(word in task.casefold() for word in (
+            if implementation_brief(task) or any(word in task.casefold() for word in (
                 "feature", "this tool", "this project", "architecture", "purpose", "codebase",
             )):
                 counts = getattr(self._vector_store, "source_counts", lambda: {})()
@@ -113,9 +128,15 @@ Be thorough but concise. Return only the requested JSON."""
                         "project purpose overview architecture existing capabilities",
                         top_k=min(2, self._top_k), filter_source=readmes[0],
                     )
+                    implementation = []
+                    if implementation_brief(task) and overview:
+                        implementation = self._vector_store.search(
+                            overview[0].content[:600] + "\nexisting implementation entry point",
+                            top_k=min(2, self._top_k), filter_doc_type="code",
+                        )
                     seen = set()
                     combined = []
-                    for hit in [*overview, *vs_results]:
+                    for hit in [*overview[:1], *implementation, *overview[1:], *vs_results]:
                         if hit.chunk_id not in seen:
                             seen.add(hit.chunk_id)
                             combined.append(hit)
@@ -126,11 +147,14 @@ Be thorough but concise. Return only the requested JSON."""
                     chunk_id = getattr(result, "chunk_id", f"chunk_{i}")
                     content = getattr(result, "content", "")
                     similarity = getattr(result, "similarity", 0.0)
-                    source = (getattr(result, "metadata", {}) or {}).get("source", "unknown")
+                    metadata = getattr(result, "metadata", {}) or {}
+                    source = metadata.get("source", "unknown")
                     context_parts.append(
                         f"[{chunk_id}] Source: {source} (relevance: {similarity:.2f})\n{content}\n"
                     )
                     citations.append(chunk_id)
+                    evidence.append({"id": chunk_id, "source": source, "excerpt": content[:700],
+                                     "kind": "project", "doc_type": metadata.get("doc_type")})
 
         if self._kg_backend:
             kg_context = self._query_knowledge_graph(query)
@@ -141,16 +165,27 @@ Be thorough but concise. Return only the requested JSON."""
         context = "\n".join(context_parts) if context_parts else "No relevant documents found in knowledge base."
 
         user_msg = f"Task: {task}\n\nResearch query: {query}\n\nSynthesize the following retrieved information into a structured research brief."
+        if implementation_brief(task):
+            user_msg += (
+                "\nIdentify the target project from its overview and a concrete limitation. "
+                "Compare two plausible options briefly, then choose one. Trace one change "
+                "through an existing file or symbol, its input, output and caller. Use exact "
+                "source IDs from the passages. Flag any missing evidence or ambiguous target."
+            )
 
         # Use tool loop if tools are available — agent autonomously gathers more data
+        tool_results = []
         if self._tool_registry and self._tool_registry.available_tools:
             result, tool_results = await self._call_llm_with_tools(user_msg, context=context)
             # Collect additional citations from tool results
             for tr in tool_results:
-                if tr.success and tr.metadata.get("chunk_ids"):
-                    citations.extend(tr.metadata["chunk_ids"])
-                if tr.success and tr.metadata.get("entity_ids"):
-                    citations.extend(tr.metadata["entity_ids"])
+                if tr.success:
+                    ids = [*tr.metadata.get("chunk_ids", []), *tr.metadata.get("entity_ids", [])]
+                    for source_id in ids:
+                        citations.append(source_id)
+                        evidence.append({"id": source_id, "source": tr.metadata.get("source", tr.tool_name),
+                                         "excerpt": tr.metadata.get("passage", tr.content)[:700],
+                                         "kind": "tool"})
         else:
             result = await self._call_llm(
                 user_msg, context=context,
@@ -158,16 +193,37 @@ Be thorough but concise. Return only the requested JSON."""
             )
 
         # Parse response and create artifact
-        confidence = self._extract_confidence(result.content)
+        citations = list(dict.fromkeys(citations))
+        content = result.content
+        if implementation_brief(task):
+            try:
+                data = json.loads(content.strip().removeprefix("```json").removesuffix("```"))
+                if not isinstance(data, dict):
+                    raise ValueError("Expected an object")
+                sources = data.get("sources", [])
+                grounded = [s for s in sources if isinstance(s, dict) and s.get("id") in citations]
+                if len(grounded) != len(sources):
+                    gaps = data.get("gaps")
+                    data["gaps"] = (gaps if isinstance(gaps, list) else []) + [
+                        "Some proposed references could not be matched to retrieved evidence."
+                    ]
+                data["sources"] = grounded
+                content = json.dumps(data, ensure_ascii=False, indent=2)
+            except (ValueError, TypeError):
+                content = json.dumps({"summary": "Research synthesis was incomplete.",
+                                      "gaps": ["Use the retrieved excerpts to assess this proposal."],
+                                      "sources": [], "confidence": 0.0})
+        confidence = self._extract_confidence(content)
         artifact = self._create_artifact(
             artifact_type="research",
-            content=result.content,
-            citations=list(set(citations)),
+            content=content,
+            citations=citations,
             confidence=confidence,
             metadata={
                 "query": query,
                 "num_sources": len(citations),
-                "used_tools": bool(self._tool_registry and self._tool_registry.available_tools),
+                "used_tools": bool(tool_results),
+                "evidence": evidence,
             },
         )
 
@@ -178,6 +234,28 @@ Be thorough but concise. Return only the requested JSON."""
             confidence=confidence,
         )
         return state
+
+    def lookup_review_evidence(self, state: AgentState, feedback: str) -> Artifact | None:
+        """Retrieve additional repository evidence for a specific review concern."""
+        if not self._vector_store:
+            return None
+        previous = {item for art in state.get_artifacts_by_type("research") for item in art.citations}
+        hits = self._vector_store.search(feedback[:1200], top_k=min(4, self._top_k))
+        evidence = [{"id": hit.chunk_id, "source": hit.metadata.get("source", "unknown"),
+                     "excerpt": hit.content[:700], "kind": "project",
+                     "doc_type": hit.metadata.get("doc_type")}
+                    for hit in hits if hit.chunk_id not in previous]
+        if not evidence:
+            return None
+        return self._create_artifact(
+            artifact_type="research",
+            content=json.dumps({"summary": "Additional repository evidence for the requested repair.",
+                                "question": feedback, "sources": [
+                                    {"id": row["id"], "source": row["source"]} for row in evidence
+                                ]}),
+            citations=[row["id"] for row in evidence],
+            metadata={"evidence": evidence, "query": feedback, "subtask_id": state.current_subtask_id},
+        )
 
     def _query_knowledge_graph(self, query: str) -> str:
         """Extract relevant entities and relations from the KG."""
@@ -227,7 +305,7 @@ Be thorough but concise. Return only the requested JSON."""
             end = content.rfind("}") + 1
             if start != -1 and end > start:
                 data = json.loads(content[start:end])
-                return float(data.get("confidence", 0.8))
-        except (json.JSONDecodeError, ValueError):
+                return max(0.0, min(1.0, float(data.get("confidence", 0.8))))
+        except (AttributeError, TypeError, ValueError):
             pass
         return 0.8

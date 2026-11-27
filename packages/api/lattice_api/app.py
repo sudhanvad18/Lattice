@@ -324,6 +324,7 @@ def create_app(
             original_task=state.original_task,
             artifacts=artifacts,
             reviews=reviews,
+            errors=state.errors,
             iteration_count=state.iteration_count,
             audit_trail=audit_events,
         )

@@ -13,6 +13,7 @@ from __future__ import annotations
 import structlog
 
 from lattice.agents.base import BaseAgent
+from lattice.agents.researcher import implementation_brief
 from lattice.agents.state import AgentRole, AgentState, Artifact
 
 logger = structlog.get_logger()
@@ -55,24 +56,28 @@ Output the document content directly. Do NOT wrap in JSON."""
 
         # Gather research artifacts as context
         research_artifacts = state.get_artifacts_by_type("research")
+        citation_aliases = {}
         if not research_artifacts:
             logger.warning("writer_no_research", task=task[:50])
             # Still attempt to write, but note the lack of research
             context = "No research artifacts available. Generate based on task description alone."
         else:
             context_parts = ["## Research Findings\n"]
-            all_citations = []
             for i, art in enumerate(research_artifacts):
                 context_parts.append(f"### Research Brief {i + 1} (confidence: {art.confidence:.2f})")
                 context_parts.append(art.content)
-                context_parts.append("")
-                all_citations.extend(art.citations)
+                if implementation_brief(task):
+                    context_parts.append("Retrieved source excerpts (cite the bracketed labels):")
+                    for evidence in art.metadata.get("evidence", []):
+                        label = f"S{len(citation_aliases) + 1}"
+                        citation_aliases[label] = evidence["id"]
+                        context_parts.append(f"[{label}] {evidence['source']}\n{evidence['excerpt']}")
             context = "\n".join(context_parts)
 
         # If there was a previous rejection, include the previous draft so the
         # writer revises it instead of starting from a new topic every time.
         own_artifacts = state.get_artifacts_by_agent(self.role)
-        own_ids = {a.id for a in own_artifacts}
+        own_ids = {a.id for a in own_artifacts if subtask is None or a.id == subtask.result_artifact_id}
         rejections = [r for r in state.reviews if not r.approved and r.artifact_id in own_ids]
         latest_rejection = rejections[-1] if rejections else None
         previous_draft = next(
@@ -100,17 +105,31 @@ Output the document content directly. Do NOT wrap in JSON."""
                 "Write the complete document based on the research provided."
             )
 
+        if implementation_brief(task):
+            user_msg += (
+                "\nDeliver a short implementation briefing. Name the target, limitation and chosen "
+                "approach. Use an exact existing filename and its bracketed source label, e.g. [S1]. "
+                "Describe the existing caller, proposed change, sample input and expected output. "
+                "Include a complete fenced, language-labelled PoC in the target's language with "
+                "representative values and a check for the expected result. Label verification "
+                "status accurately. List unverified dependencies or upstream APIs as gaps."
+            )
         result = await self._call_llm(user_msg, context=context)
+        content = result.content
+        for label, source_id in citation_aliases.items():
+            content = content.replace(f"[{label}]", f"[{source_id}]")
 
         # Collect citations from research that informed this document
         citations = []
         for art in research_artifacts:
             citations.extend(art.citations)
 
+        if implementation_brief(task):
+            citations = [item for item in citations if f"[{item}]" in content]
         artifact = self._create_artifact(
             artifact_type="document",
-            content=result.content,
-            citations=list(set(citations)),
+            content=content,
+            citations=list(dict.fromkeys(citations)),
             confidence=0.9 if research_artifacts else 0.5,
             metadata={
                 "query": query,

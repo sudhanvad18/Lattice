@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 import structlog
 
-from lattice.config import InferenceProvider, get_settings
+from lattice.config import InferenceProvider, Settings, get_settings
 
 logger = structlog.get_logger()
 
@@ -331,11 +331,15 @@ class AnthropicProvider(LLMProvider):
 class OpenAIProvider(LLMProvider):
     """Cloud inference via OpenAI API."""
 
-    def __init__(self, api_key: str, model: str = "gpt-4o") -> None:
+    def __init__(
+        self, api_key: str, model: str = "gpt-4o", *, base_url: str | None = None,
+        provider_name: str = "openai",
+    ) -> None:
         import openai
 
-        self._client = openai.OpenAI(api_key=api_key)
-        self._async_client = openai.AsyncOpenAI(api_key=api_key)
+        self._provider_name = provider_name
+        self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        self._async_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._model = model
 
     async def stream(
@@ -382,7 +386,7 @@ class OpenAIProvider(LLMProvider):
         return GenerationResult(
             content=content,
             model=self._model,
-            provider="openai",
+            provider=self._provider_name,
             usage=usage,
             raw_response=response,
         )
@@ -412,7 +416,7 @@ class OpenAIProvider(LLMProvider):
         return GenerationResult(
             content=content,
             model=self._model,
-            provider="openai",
+            provider=self._provider_name,
             usage=usage,
             raw_response=response,
         )
@@ -455,3 +459,20 @@ def get_provider(
         )
     else:
         raise ValueError(f"Unknown provider: {provider_type}")
+
+def get_writer_provider(default: LLMProvider, settings: Settings) -> LLMProvider:
+    """Resolve the optional writer route for an Ask task."""
+    if not settings.writer_model and not settings.writer_provider:
+        return default
+    if settings.writer_provider == "vllm":
+        if not settings.writer_model:
+            raise ValueError("Set LATTICE_WRITER_MODEL to the model served by vLLM.")
+        return OpenAIProvider(
+            api_key=settings.vllm_api_key or "local",
+            model=settings.writer_model,
+            base_url=settings.vllm_base_url,
+            provider_name="vllm",
+        )
+    backend = InferenceProvider(settings.writer_provider or settings.default_provider)
+    options = {"model": settings.writer_model} if settings.writer_model else {}
+    return get_provider(backend, **options)

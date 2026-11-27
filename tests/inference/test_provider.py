@@ -288,3 +288,30 @@ async def test_ollama_generate_streams_counts_usage_and_closes(monkeypatch, endi
         assert (result.content, result.provider, result.model) == ("First last", "ollama", "local")
         assert result.usage == {"prompt_tokens": 4, "completion_tokens": 2}
     assert body.closed
+
+
+def test_writer_route_is_opt_in_and_can_target_local_model():
+    from lattice.config import Settings
+    from lattice.inference.provider import get_writer_provider
+
+    default = MockProvider()
+    settings = Settings(_env_file=None, writer_provider=None, writer_model=None)
+    assert get_writer_provider(default, settings) is default
+    settings.writer_provider = "ollama"
+    settings.writer_model = "specialist"
+    writer = get_writer_provider(default, settings)
+    assert isinstance(writer, OllamaProvider)
+    assert writer._model == "specialist"
+
+
+def test_vllm_writer_uses_dedicated_endpoint_and_credentials(monkeypatch):
+    from lattice.config import Settings
+    from lattice.inference.provider import get_writer_provider
+
+    monkeypatch.setenv("LATTICE_OPENAI_API_KEY", "unrelated-cloud-key")
+    settings = Settings(_env_file=None, writer_provider="vllm", writer_model="coder",
+                        vllm_base_url="http://localhost:8100/v1", vllm_api_key=None)
+    writer = get_writer_provider(MockProvider(), settings)
+    assert str(writer._async_client.base_url) == "http://localhost:8100/v1/"
+    assert writer._async_client.api_key == "local"
+    assert writer._provider_name == "vllm"

@@ -16,12 +16,16 @@ with the Reviewer's feedback.
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 from dataclasses import replace
+from pathlib import Path
 
 import structlog
 
 from lattice.agents.base import BaseAgent
+from lattice.agents.researcher import evidence_context, implementation_brief
 from lattice.agents.state import AgentRole, AgentState, Artifact, ReviewVerdict
 
 logger = structlog.get_logger()
@@ -95,6 +99,8 @@ Reject if there are factual errors, missing critical information, or poor qualit
             context_parts.append("\n## Source Research (for fact-checking)")
             for r in research:
                 context_parts.append(r.content[:1000])
+                if implementation_brief(state.original_task):
+                    context_parts.append(evidence_context(r))
 
         context = "\n".join(context_parts)
 
@@ -104,13 +110,25 @@ Reject if there are factual errors, missing critical information, or poor qualit
             f"Evaluate against the original task requirements and source research."
         )
 
-        result = await self._call_llm(
-            user_msg, context=context,
-            config=replace(self._config, temperature=0.1, json_output=True),
-        )
-
-        # Parse the review verdict
-        verdict = self._parse_verdict(result.content, artifact_to_review.id)
+        issues = []
+        if implementation_brief(state.original_task):
+            issues = self._check_brief(artifact_to_review, research)
+            user_msg += (
+                " Check the claimed integration against the actual repository excerpts. Verify "
+                "the proposed input, caller, output and sample result match. Reject invented "
+                "APIs or unresolved placeholders in the PoC. Treat the example as unexecuted."
+            )
+        if issues:
+            verdict = ReviewVerdict(
+                artifact_id=artifact_to_review.id, approved=False, confidence=1.0, issues=issues,
+                reasoning="The draft failed the implementation briefing checks.",
+            )
+        else:
+            result = await self._call_llm(
+                user_msg, context=context,
+                config=replace(self._config, temperature=0.1, json_output=True),
+            )
+            verdict = self._parse_verdict(result.content, artifact_to_review.id)
         state.reviews.append(verdict)
 
         logger.info(
@@ -121,6 +139,33 @@ Reject if there are factual errors, missing critical information, or poor qualit
             issues=len(verdict.issues),
         )
         return state
+
+    @staticmethod
+    def _check_brief(draft: Artifact, research: list[Artifact]) -> list[str]:
+        issues = []
+        project_sources = [
+            item for art in research for item in art.metadata.get("evidence", [])
+            if item.get("kind") == "project"
+        ]
+        code_sources = [item for item in project_sources if item.get("doc_type") == "code"]
+        if not any(f"[{item['id']}]" in draft.content and Path(item["source"]).name in draft.content
+                   for item in (code_sources or project_sources)):
+            issues.append("Name an existing project file and cite its matching retrieved [source_id].")
+        blocks = re.findall(
+            r"^ {0,3}```([\w+#.-]+)[^\S\n]*\n(.*?)^ {0,3}```[ \t]*$",
+            draft.content, flags=re.MULTILINE | re.DOTALL,
+        )
+        if not any(code.strip() for _, code in blocks):
+            issues.append("Supply a complete language-labelled fenced code example with sample input and output.")
+        for language, code in blocks:
+            if language.lower() in {"python", "py", "python3"}:
+                try:
+                    ast.parse(code)
+                except SyntaxError as error:
+                    issues.append(f"Fix Python syntax at example line {error.lineno}: {error.msg}.")
+                except (ValueError, RecursionError):
+                    issues.append("Simplify the Python example so that its syntax can be checked.")
+        return issues
 
     def _parse_verdict(self, content: str, artifact_id: str) -> ReviewVerdict:
         """Parse the LLM's JSON verdict, with fallback for malformed responses."""

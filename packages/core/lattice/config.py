@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-sonnet-4-20250514"
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4o"
+
+    # Optional Ask agent-team integrations. Other roles keep the default model.
+    writer_model: str | None = Field(default=None, min_length=1)
+    writer_provider: Literal["ollama", "openai", "anthropic", "vllm"] | None = None
+    vllm_base_url: str = "http://127.0.0.1:8100/v1"
+    vllm_api_key: Optional[str] = None
+    openclaw_gateway_url: str | None = None
+    openclaw_gateway_token: Optional[str] = None
 
     # --- Knowledge Graph ---
     graph_backend: GraphBackend = GraphBackend.NETWORKX

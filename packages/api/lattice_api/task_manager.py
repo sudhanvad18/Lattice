@@ -23,8 +23,9 @@ from lattice.agents.reviewer import ReviewerAgent
 from lattice.agents.state import AgentState, TaskStatus
 from lattice.agents.writer import WriterAgent
 from lattice.comms.checkpoint import CheckpointStore, LocalCheckpointStore
+from lattice.config import get_settings
 from lattice.inference.health import friendly_provider_error
-from lattice.inference.provider import LLMProvider, get_provider
+from lattice.inference.provider import LLMProvider, get_provider, get_writer_provider
 from lattice.writeback import ApprovalGate, ApprovalMode, WriteBackEngine
 
 from lattice_api.audit import AuditEventType, AuditTrail
@@ -144,16 +145,22 @@ class TaskManager:
                 from lattice.inference.provider import get_provider
                 provider = get_provider()
 
+            settings = get_settings()
+            registry = None
+            if settings.openclaw_gateway_url:
+                from lattice.agents.openclaw import create_web_registry
+
+                registry = create_web_registry(settings.openclaw_gateway_url, settings.openclaw_gateway_token)
             orchestrator = OrchestratorAgent(
                 provider=provider,
                 researcher=ResearcherAgent(
-                    provider=provider,
+                    provider=provider, tool_registry=registry,
                     **({
                         "vector_store": self._knowledge_base.vector_store,
                         "kg_backend": self._knowledge_base.graph,
                     } if self._knowledge_base is not None else {}),
                 ),
-                writer=WriterAgent(provider=provider),
+                writer=WriterAgent(provider=get_writer_provider(provider, settings)),
                 reviewer=ReviewerAgent(provider=provider),
             )
 

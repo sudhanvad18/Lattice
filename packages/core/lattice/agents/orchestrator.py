@@ -24,7 +24,7 @@ import structlog
 from langgraph.graph import END, StateGraph
 
 from lattice.agents.base import BaseAgent
-from lattice.agents.researcher import ResearcherAgent
+from lattice.agents.researcher import ResearcherAgent, implementation_brief
 from lattice.agents.reviewer import ReviewerAgent
 from lattice.agents.state import (
     AgentRole,
@@ -55,7 +55,7 @@ class OrchestratorAgent(BaseAgent):
         researcher: ResearcherAgent | None = None,
         writer: WriterAgent | None = None,
         reviewer: ReviewerAgent | None = None,
-        max_revisions: int = 3,
+        max_revisions: int = 2,
         **kwargs,
     ) -> None:
         super().__init__(provider, **kwargs)
@@ -94,22 +94,22 @@ Rules:
 - Writing tasks should depend on research tasks
 - The reviewer is invoked automatically after writing, don't plan it explicitly
 - Prefer one KB research step followed by one briefing. Combine related research questions.
-- Research uses the current knowledge base; no web browsing is available.
-- Do not promise a web search.
+- Research uses the active knowledge base and any configured research tools.
 - Identify evidence gaps. Code examples are illustrative only. Never execute code or write files.
 - Dependencies are zero-based indices into subtasks."""
 
     async def execute(self, state: AgentState) -> AgentState:
         """Create a task plan (only called during planning phase)."""
-        result = await self._call_llm(
-            f"Decompose this task into subtasks:\n\n{state.original_task}",
-            config=replace(self._config, temperature=0.1, json_output=True),
-        )
-
-        plan = self._parse_plan(result.content, state.original_task)
-        state.plan = plan
+        if implementation_brief(state.original_task):
+            state.plan = self._research_then_write(state.original_task)
+        else:
+            result = await self._call_llm(
+                f"Decompose this task into subtasks:\n\n{state.original_task}",
+                config=replace(self._config, temperature=0.1, json_output=True),
+            )
+            state.plan = self._parse_plan(result.content, state.original_task)
         state.status = TaskStatus.IN_PROGRESS
-        logger.info("orchestrator_planned", subtasks=len(plan.subtasks))
+        logger.info("orchestrator_planned", subtasks=len(state.plan.subtasks))
         return state
 
     def _parse_plan(self, content: str, task_description: str) -> TaskPlan:
@@ -146,7 +146,10 @@ Rules:
         except (ValueError, KeyError, TypeError, RecursionError) as e:
             logger.warning("orchestrator_plan_parse_failed", error=str(e))
 
-        # Fallback: simple research → write plan
+        return self._research_then_write(task_description)
+
+    @staticmethod
+    def _research_then_write(task_description: str) -> TaskPlan:
         research_st = SubTask(
             description=f"Research: {task_description}",
             assigned_to=AgentRole.RESEARCHER,
@@ -222,12 +225,23 @@ Rules:
             subtask = next(st for st in state.plan.subtasks if st.id == state.current_subtask_id)
             agent = (self._researcher if subtask.assigned_to == AgentRole.RESEARCHER
                      else self._writer)
+            if subtask.revision_count and implementation_brief(state.original_task):
+                verdict = state.reviews[-1]
+                question = " ".join([*verdict.issues, *verdict.suggestions])
+                if any(term in question.casefold() for term in ("source", "evidence", "project file")):
+                    start(state, AgentRole.RESEARCHER, "Looking up evidence for the requested repair")
+                    extra = self._researcher.lookup_review_evidence(state, question)
+                    if extra:
+                        state.artifacts.append(extra)
+                        publish(state, "artifact_produced", "Retrieved additional project evidence",
+                                artifact_id=extra.id)
             start(state, agent.role, subtask.description)
             before = len(state.artifacts)
             state = await agent.execute(state)
             subtask = next(st for st in state.plan.subtasks if st.id == state.current_subtask_id)
             produced = state.artifacts[before:]
             for artifact in produced:
+                artifact.metadata["subtask_id"] = subtask.id
                 publish(state, "artifact_produced", f"Produced {artifact.artifact_type}",
                         artifact_id=artifact.id)
             if not produced or TaskStatus.FAILED in (state.status, subtask.status):
@@ -262,16 +276,16 @@ Rules:
                 # the global iteration cap.
                 if subtask.revision_count >= self._max_revisions:
                     subtask.status = TaskStatus.COMPLETED
-                    note = (f"Accepted after {subtask.revision_count} revisions. "
-                            f"Unresolved reviewer concerns: "
-                            f"{'; '.join(verdict.issues) or verdict.reasoning or 'quality below threshold'}")
+                    issues = "; ".join(verdict.issues) or verdict.reasoning or "quality below threshold"
+                    note = (f"Draft delivered after {subtask.revision_count} rejected reviews. "
+                            f"Unresolved reviewer concerns: {issues}")
                     state.errors.append(note)
                     message = note
                 else:
                     subtask.status = TaskStatus.REJECTED
                     message = "Draft rejected"
-            publish(state, "review_complete", message, approved=subtask.status == TaskStatus.COMPLETED,
-                    reasoning=verdict.reasoning, issues=verdict.issues)
+            publish(state, "review_complete", message, approved=verdict.approved,
+                    artifact_id=verdict.artifact_id, reasoning=verdict.reasoning, issues=verdict.issues)
             publish(state, "agent_completed", "Finished reviewing the draft")
             return state.model_dump()
 

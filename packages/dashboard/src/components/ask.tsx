@@ -21,6 +21,7 @@ import {
   ChatCitation,
   AgentEvent,
   Artifact,
+  ArtifactReview,
 } from "@/lib/api";
 import { useKB } from "@/lib/kb-context";
 
@@ -44,6 +45,7 @@ interface AgentRun {
   events: AgentEvent[];
   status: "running" | "done" | "error";
   artifacts?: Artifact[];
+  reviews?: ArtifactReview[];
   progress?: string;
   resultPending?: boolean;
   errorMessage?: string;
@@ -80,6 +82,12 @@ function artifact(x: unknown): x is Artifact {
     && Array.isArray(x.citations) && x.citations.every((id) => typeof id === "string");
 }
 
+function review(x: unknown): x is ArtifactReview {
+  return record(x) && typeof x.artifact_id === "string" && typeof x.approved === "boolean"
+    && typeof x.reasoning === "string" && Array.isArray(x.issues)
+    && x.issues.every((issue) => typeof issue === "string");
+}
+
 function restoreMessage(x: unknown): ConversationMessage[] {
   if (!record(x) || (x.role !== "user" && x.role !== "assistant") || typeof x.content !== "string"
     || typeof x.timestamp !== "string" || !Number.isFinite(Date.parse(x.timestamp))) return [];
@@ -101,6 +109,7 @@ function restoreMessage(x: unknown): ConversationMessage[] {
         return event && event.task_id === run.taskId ? [event] : [];
       }) : [],
       artifacts: Array.isArray(run.artifacts) ? run.artifacts.filter(artifact) : undefined,
+      reviews: Array.isArray(run.reviews) ? run.reviews.filter(review) : undefined,
       errorMessage: typeof run.errorMessage === "string" ? run.errorMessage : undefined,
     };
   }
@@ -151,7 +160,7 @@ function saveConversation(state: Conversation) {
       let size = JSON.stringify(message).length + 1;
       if (size > (pending(message) ? activeBudget : remaining)) {
         if (message.agentRun) {
-          message = { ...message, agentRun: { ...message.agentRun, events: [], artifacts: undefined,
+          message = { ...message, agentRun: { ...message.agentRun, events: [], artifacts: undefined, reviews: undefined,
             resultPending: message.agentRun.status !== "running" } };
         } else {
           message = { ...message, content: message.content.slice(0, 100_000), citations: [],
@@ -613,6 +622,8 @@ function monitorTask(initial: AgentRun, update: UpdateRun, pause: (reason: strin
   let busy = false;
   let wake = false;
   let stopped = false;
+  let artifactCount = initial.artifacts?.length ?? 0;
+  let reviewCount = initial.reviews?.length ?? 0;
   let failures = 0;
   let connections = 0;
   let terminal = initial.status === "running" ? undefined : initial.status;
@@ -622,7 +633,7 @@ function monitorTask(initial: AgentRun, update: UpdateRun, pause: (reason: strin
     if (!terminal) return;
     const status = terminal;
     update(id, (run) => ({ ...run, status, resultPending: true,
-      errorMessage: status === "error" ? terminalError || "The agent task failed." : undefined }));
+      errorMessage: status === "error" ? terminalError || "The agent task failed." : terminalError || undefined }));
   }
   function disconnect() {
     if (!socket) return;
@@ -660,6 +671,7 @@ function monitorTask(initial: AgentRun, update: UpdateRun, pause: (reason: strin
           && e.event_type === event.event_type && e.details === event.details)) return run;
         return { ...run, events: [...run.events, event].slice(-eventLimit), progress: event.details };
       });
+      if (raw.event === "artifact_produced" || raw.event === "review_complete") schedule(0);
       if (raw.event === "task_complete" || raw.event === "error") {
         terminal = raw.event === "error" ? "error" : "done";
         if (terminal === "error") terminalError = event.details;
@@ -683,25 +695,35 @@ function monitorTask(initial: AgentRun, update: UpdateRun, pause: (reason: strin
       if (stopped) return;
       terminal = terminalStatus(task?.status) ?? terminal;
       terminalError = task?.errors?.filter((s) => s.trim()).join("\n") || terminalError;
-      if (terminal) {
-        markTerminal();
-        disconnect();
+      if (terminal || (task?.artifact_count ?? 0) > artifactCount || (task?.review_count ?? 0) > reviewCount) {
+        if (terminal) {
+          markTerminal();
+          disconnect();
+        }
+        const requestedFinal = Boolean(terminal);
         const result = await getTaskResult(id, signal());
         if (stopped) return;
-        const status = terminalStatus(result.status) ?? terminal;
-        const errorMessage = result.errors?.filter((s) => s.trim()).join("\n") || terminalError
-          || "The agent task failed without an error description.";
-        update(id, (run) => ({ ...run, status, resultPending: false, artifacts: result.artifacts,
-          errorMessage: status === "error" ? errorMessage : undefined }));
-        stop();
-      } else {
-        if (task?.current_agent) {
-          const progress = [task.current_agent, task.iteration_count != null && `iteration ${task.iteration_count}`]
-            .filter(Boolean).join(" · ");
-          update(id, (run) => run.progress === progress ? run : { ...run, progress });
+        // A terminal event may have arrived while an older partial snapshot was in flight.
+        if (terminal && !requestedFinal && !terminalStatus(result.status)) return;
+        terminal = terminalStatus(result.status) ?? terminal;
+        artifactCount = result.artifacts.length;
+        reviewCount = result.reviews?.length ?? 0;
+        const detail = result.errors?.filter((s) => s.trim()).join("\n") || terminalError;
+        const status = terminal ?? "running";
+        update(id, (run) => ({ ...run, status, resultPending: false,
+          artifacts: result.artifacts, reviews: result.reviews ?? [],
+          errorMessage: detail || (status === "error" ? "The agent task failed without an error description." : undefined) }));
+        if (terminal) {
+          stop();
+          return;
         }
-        connect();
       }
+      if (task?.current_agent) {
+        const progress = [task.current_agent, task.iteration_count != null && `iteration ${task.iteration_count}`]
+          .filter(Boolean).join(" · ");
+        update(id, (run) => run.progress === progress ? run : { ...run, progress });
+      }
+      connect();
       failures = 0;
     } catch (error) {
       if (stopped) return;
@@ -721,12 +743,78 @@ function monitorTask(initial: AgentRun, update: UpdateRun, pause: (reason: strin
   return stop;
 }
 
+function groupArtifacts(artifacts: Artifact[]) {
+  const groups = new Map<string, Artifact[]>();
+  for (const artifact of artifacts) {
+    const { subtask_id: subtask, query } = artifact.metadata ?? {};
+    const owner = typeof subtask === "string" ? subtask : typeof query === "string" ? query : artifact.id;
+    const key = JSON.stringify([artifact.source_agent, artifact.artifact_type, owner]);
+    const versions = groups.get(key);
+    if (versions) versions.push(artifact);
+    else groups.set(key, [artifact]);
+  }
+  return Array.from(groups.values());
+}
+
+function ArtifactBody({ artifact, verdict }: { artifact: Artifact; verdict?: ArtifactReview }) {
+  const evidence = artifact.metadata?.evidence;
+  const sources = Array.isArray(evidence) ? evidence.filter((item): item is {
+    id: string; source: string; excerpt: string;
+  } => record(item) && typeof item.id === "string" && typeof item.source === "string"
+    && typeof item.excerpt === "string") : [];
+  return <>
+    <pre className="whitespace-pre-wrap break-words text-sm text-zinc-300 leading-relaxed max-h-80 overflow-auto scrollbar-thin">
+      {artifact.artifact_type === "research" ? formatResearch(artifact.content) : artifact.content}
+    </pre>
+    {sources.length > 0 && <details className="mt-2 text-xs text-zinc-400">
+      <summary className="cursor-pointer">Source passages ({sources.length})</summary>
+      {sources.map((source, index) => <div key={index} className="mt-2 pl-3">
+        {/^(https?):\/\//i.test(source.source)
+          ? <a href={source.source} target="_blank" rel="noreferrer" className="break-all text-emerald-400 underline">{source.source}</a>
+          : <span className="break-all font-mono">{source.source}</span>}
+        <p className="text-zinc-500 break-all">{source.id}</p>
+        <blockquote className="mt-1 whitespace-pre-wrap">{source.excerpt}</blockquote>
+      </div>)}
+    </details>}
+    {verdict && <div className={`mt-3 border-t border-zinc-800 pt-2 text-xs ${verdict.approved ? "text-emerald-300" : "text-amber-300"}`}>
+      <strong>{verdict.approved ? "Reviewer approved" : "Reviewer requested changes"}</strong>
+      {(verdict.issues.length ? verdict.issues : [verdict.reasoning]).filter(Boolean).map((issue, i) =>
+        <p key={i} className="mt-1">{issue}</p>)}
+    </div>}
+  </>;
+}
+
+// Keep unfamiliar research formats readable even when a provider returns free text.
+function formatResearch(content: string) {
+  try {
+    const brief: unknown = JSON.parse(content);
+    if (!record(brief) || typeof brief.summary !== "string") return content;
+    return Object.entries(brief).map(([key, value]) => {
+      if (key === "summary") return value;
+      const label = key.replaceAll("_", " ");
+      const sections = Array.isArray(value) ? value : [value];
+      const lines = sections.map((item) => {
+        if (typeof item === "string") return item;
+        if (key === "sources" && record(item) && typeof item.id === "string" && typeof item.relevance === "string") {
+          return `${item.id} — ${item.relevance}`;
+        }
+        return JSON.stringify(item, null, 2);
+      });
+      return lines.length ? label[0].toUpperCase() + label.slice(1) + "\n" + lines.join("\n") : "";
+    }).filter(Boolean).join("\n\n");
+  } catch { return content; }
+}
+
 function AgentRunBubble({ run, timestamp, updateRun }: {
   run: AgentRun; timestamp: Date; updateRun: UpdateRun;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [monitorError, setMonitorError] = useState("");
+  const artifactGroups = groupArtifacts(run.artifacts ?? []);
+  const verdictByArtifact = new Map(run.reviews?.map((r) => [r.artifact_id, r]));
+  const unresolved = run.status === "done" && (run.errorMessage || artifactGroups.some(
+    (versions) => verdictByArtifact.get(versions[versions.length - 1].id)?.approved === false));
   const monitoring = run.status === "running" || run.resultPending === true;
   const startMonitor = useEffectEvent(() => monitorTask(run, updateRun, setMonitorError));
   useEffect(() => {
@@ -744,6 +832,8 @@ function AgentRunBubble({ run, timestamp, updateRun }: {
           <div className="flex items-center gap-2">
             {run.status === "running" ? (
               <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+            ) : unresolved ? (
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
             ) : run.status === "error" ? (
               <AlertCircle className="w-4 h-4 text-red-400" />
             ) : (
@@ -754,7 +844,7 @@ function AgentRunBubble({ run, timestamp, updateRun }: {
                 ? monitorError ? "Task monitoring paused" : "Agent team running..."
                 : run.status === "error"
                   ? "Agent team failed"
-                  : "Agent team complete"}
+                  : unresolved ? "Finished with unresolved concerns" : "Agent team complete"}
             </span>
             <span className="text-xs text-zinc-600 font-mono">{run.taskId.slice(0, 8)}</span>
           </div>
@@ -764,6 +854,10 @@ function AgentRunBubble({ run, timestamp, updateRun }: {
           </div>
         </button>
 
+        {run.status === "done" && run.reviews === undefined && !monitoring && (
+          <button className="px-4 pb-2 text-xs text-zinc-300 underline" onClick={() =>
+            updateRun(run.taskId, (previous) => ({ ...previous, resultPending: true }))}>Load review details</button>
+        )}
         {monitorError && (
           <div className="border-t border-zinc-800 px-4 py-2 text-xs text-amber-300">
             {monitorError} <button className="underline" onClick={() => {
@@ -800,27 +894,30 @@ function AgentRunBubble({ run, timestamp, updateRun }: {
           </div>
         )}
 
-        {/* Error */}
-        {run.status === "error" && run.errorMessage && (
+        {run.errorMessage && (
           <div className="border-t border-zinc-800 px-4 py-2">
-            <p className="text-xs text-red-300">{run.errorMessage}</p>
+            <p className={`whitespace-pre-wrap text-xs ${run.status === "error" ? "text-red-300" : "text-amber-300"}`}>{run.errorMessage}</p>
           </div>
         )}
 
-        {/* Final artifact */}
-        {run.artifacts?.map((artifact) => (
-          <div key={artifact.id} className="border-t border-zinc-800 p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-zinc-500 capitalize">{artifact.artifact_type}</span>
-              <span className="text-xs text-zinc-500">
-                confidence: {(artifact.confidence * 100).toFixed(0)}%
-              </span>
-            </div>
-            <pre className="text-sm text-zinc-300 whitespace-pre-wrap font-mono leading-relaxed bg-zinc-950 rounded-lg p-3 max-h-64 overflow-y-auto scrollbar-thin">
-              {artifact.content}
-            </pre>
-          </div>
-        ))}
+        {artifactGroups.map((versions) => {
+          const latest = versions[versions.length - 1];
+          const query = latest.metadata?.query;
+          const title = typeof query === "string" && query.trim() ? query : latest.artifact_type;
+          return <section key={versions[0].id} className="border-t border-zinc-800 p-4">
+            <h3 className="text-sm text-zinc-100 font-medium mb-2">{title}</h3>
+            {latest.artifact_type === "document" && <p className="mb-2 text-xs text-zinc-400">Draft {versions.length}</p>}
+            <ArtifactBody artifact={latest} verdict={verdictByArtifact.get(latest.id)} />
+            {versions.length > 1 && <details className="mt-3 text-xs text-zinc-400">
+              <summary className="cursor-pointer">Previous drafts ({versions.length - 1})</summary>
+              {versions.slice(0, -1).map((previous, i) =>
+                <details key={previous.id} className="mt-2 pl-3">
+                  <summary className="cursor-pointer">Draft {i + 1}</summary>
+                  <ArtifactBody artifact={previous} verdict={verdictByArtifact.get(previous.id)} />
+                </details>)}
+            </details>}
+          </section>;
+        })}
 
         <div className="px-4 pb-2">
           <span className="text-xs text-zinc-600">{timestamp.toLocaleTimeString()}</span>

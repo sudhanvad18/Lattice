@@ -479,7 +479,7 @@ class TestOrchestrator:
         assert result.iteration_count == 3
         assert len(result.reviews) == 3
         assert all(not review.approved for review in result.reviews)
-        assert any("Accepted after 3 revisions" in e for e in result.errors)
+        assert any("3 rejected reviews" in e for e in result.errors)
         assert any("Needs more sources" in e for e in result.errors)
 
 
@@ -597,3 +597,63 @@ async def test_unschedulable_required_work_fails(status, monkeypatch):
     result = await orchestrator.run("task")
     assert result.status == TaskStatus.FAILED and result.errors
     assert result.iteration_count == 0
+
+
+async def test_brief_repair_uses_real_project_evidence_and_checks_python_syntax():
+    from lattice.retrieval.vector_store import SearchResult
+
+    class Store:
+        def search(self, query, top_k, **kwargs):
+            return [SearchResult("chunk-123", "def score(sample): return sum(sample)",
+                                 {"source": "/project/scoring.py", "doc_type": "code"}, 0.9)]
+
+    task = "Research an integration, then write a briefing with PoC code."
+    bad = "In scoring.py [S1]:\n```python\nenv = # Define your environment here\n```"
+    good = "Use score() in scoring.py [S1].\n```python\nassert sum([1, 2]) == 3\n```"
+    provider = MockProvider(responses=[
+        json.dumps({"summary": "Scoring module", "sources": [{"id": "invented"}]}),
+        bad, good, '{"approved":true,"reasoning":"Implementation matches input/output."}',
+    ])
+    reviews = []
+    def observe(state, event, data):
+        if event == "review_complete":
+            reviews.append(data)
+    orchestrator = OrchestratorAgent(provider, researcher=ResearcherAgent(provider, vector_store=Store()))
+    result = await orchestrator.run(task, observer=observe)
+    research, first, repaired = result.artifacts
+    assert all(a.metadata["subtask_id"] for a in result.artifacts)
+    assert first.metadata["subtask_id"] == repaired.metadata["subtask_id"]
+    assert json.loads(research.content)["sources"] == []
+    assert research.metadata["evidence"][0]["excerpt"].startswith("def score(")
+    assert result.status == TaskStatus.COMPLETED and result.errors == []
+    assert len(result.plan.subtasks) == 2
+    assert [r["approved"] for r in reviews] == [False, True]
+    assert "Python syntax" in reviews[0]["issues"][0]
+    assert repaired.citations == ["chunk-123"]
+
+
+async def test_exhausted_brief_keeps_reviewer_rejection_after_one_repair():
+    provider = MockProvider(responses=['{"summary":"No evidence"}', "Draft", "Draft"])
+    observed = []
+    result = await OrchestratorAgent(provider).run(
+        "Write a briefing with a proof of concept",
+        observer=lambda state, event, data: observed.append((event, data)),
+    )
+    assert [r.approved for r in result.reviews] == [False, False]
+    assert result.status == TaskStatus.COMPLETED
+    assert "Unresolved reviewer concerns" in result.errors[-1]
+    assert not any(d["approved"] for e, d in observed if e == "review_complete")
+
+
+async def test_writer_starts_new_subtask_without_old_feedback():
+    provider = MockProvider()
+    first = Artifact(artifact_type="document", content="REJECTED FIRST DRAFT",
+                     source_agent=AgentRole.WRITER)
+    second = SubTask(description="Document a different component", assigned_to=AgentRole.WRITER)
+    state = AgentState(original_task="Write two reports", artifacts=[first],
+                       current_subtask_id=second.id,
+                       plan=TaskPlan(task_description="Two reports", subtasks=[second]),
+                       reviews=[ReviewVerdict(artifact_id=first.id, approved=False)])
+    await WriterAgent(provider).execute(state)
+    assert "REJECTED FIRST DRAFT" not in " ".join(m.content for m in provider.last_messages)
+    assert not state.artifacts[-1].metadata["is_revision"]
