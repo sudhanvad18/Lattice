@@ -69,22 +69,36 @@ Output the document content directly. Do NOT wrap in JSON."""
                 all_citations.extend(art.citations)
             context = "\n".join(context_parts)
 
-        # If there was a previous rejection, include the feedback
-        rejections = [
-            r for r in state.reviews
-            if not r.approved and r.artifact_id in [
-                a.id for a in state.get_artifacts_by_agent(self.role)
-            ]
-        ]
-        if rejections:
-            latest_rejection = rejections[-1]
-            context += f"\n\n## Revision Required\nPrevious draft was rejected:\n"
-            context += f"Issues: {', '.join(latest_rejection.issues)}\n"
-            context += f"Suggestions: {', '.join(latest_rejection.suggestions)}\n"
-            context += f"Reasoning: {latest_rejection.reasoning}\n"
+        # If there was a previous rejection, include the previous draft so the
+        # writer revises it instead of starting from a new topic every time.
+        own_artifacts = state.get_artifacts_by_agent(self.role)
+        own_ids = {a.id for a in own_artifacts}
+        rejections = [r for r in state.reviews if not r.approved and r.artifact_id in own_ids]
+        latest_rejection = rejections[-1] if rejections else None
+        previous_draft = next(
+            (a for a in reversed(own_artifacts) if a.id == latest_rejection.artifact_id),
+            None,
+        ) if latest_rejection else None
 
         query = subtask.description if subtask else task
-        user_msg = f"Task: {task}\n\nSpecific instruction: {query}\n\nWrite the complete document based on the research provided."
+        if latest_rejection and previous_draft:
+            context += "\n\n## Previous Draft (to revise)\n"
+            context += previous_draft.content
+            context += "\n\n## Reviewer Feedback on That Draft\n"
+            context += f"Issues: {'; '.join(latest_rejection.issues)}\n"
+            context += f"Suggestions: {'; '.join(latest_rejection.suggestions)}\n"
+            context += f"Reasoning: {latest_rejection.reasoning}\n"
+            user_msg = (
+                f"Task: {task}\n\nSpecific instruction: {query}\n\n"
+                "Revise the previous draft above to address the reviewer feedback. "
+                "Keep the same topic and overall structure; address each issue listed. "
+                "Do not switch to a different feature or subject."
+            )
+        else:
+            user_msg = (
+                f"Task: {task}\n\nSpecific instruction: {query}\n\n"
+                "Write the complete document based on the research provided."
+            )
 
         result = await self._call_llm(user_msg, context=context)
 

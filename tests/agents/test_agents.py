@@ -179,6 +179,30 @@ class TestWriterAgent:
         context_msg = next((m for m in last_msgs if "safety" in m.content.lower()), None)
         assert context_msg is not None
 
+    @pytest.mark.asyncio
+    async def test_revision_includes_previous_draft_and_locks_topic(self):
+        provider = MockProvider(responses=["Revised briefing with the same topic..."])
+        agent = WriterAgent(provider=provider)
+        state = AgentState(original_task="Write a feature briefing")
+        prev_doc = Artifact(
+            artifact_type="document",
+            content="## Active Session Notifications\nOriginal draft body.",
+            source_agent=AgentRole.WRITER,
+        )
+        state.artifacts.append(prev_doc)
+        state.reviews.append(ReviewVerdict(
+            artifact_id=prev_doc.id, approved=False,
+            issues=["No implementation plan"], suggestions=["Add integration steps"],
+            reasoning="Plan missing",
+        ))
+        await agent.execute(state)
+        joined = "\n".join(m.content for m in provider.last_messages)
+        user_msg = provider.last_messages[-1].content
+        assert "Active Session Notifications" in joined
+        assert "Original draft body." in joined
+        assert "Revise the previous draft" in user_msg
+        assert "do not switch" in user_msg.lower()
+
 
 # --- Reviewer Agent Tests ---
 
@@ -423,7 +447,8 @@ class TestOrchestrator:
                 {"description": "Write report", "assigned_to": "writer", "depends_on": []},
             ]}),
         ] + ["Draft", rejection] * 50
-        orchestrator = OrchestratorAgent(provider=MockProvider(responses=responses))
+        orchestrator = OrchestratorAgent(provider=MockProvider(responses=responses),
+                                         max_revisions=50)
 
         result = await orchestrator.run("Write a report", max_iterations=4)
 
@@ -432,6 +457,30 @@ class TestOrchestrator:
         assert "Still wrong" in result.errors[-1]
         assert len(result.reviews) == 4
         assert all(not review.approved for review in result.reviews)
+
+    @pytest.mark.asyncio
+    async def test_persistent_rejection_breaks_out_at_max_revisions(self):
+        """After max_revisions on one subtask, accept the draft to avoid a loop."""
+        rejection = json.dumps({
+            "approved": False, "confidence": 0.5, "issues": ["Needs more sources"],
+            "suggestions": [], "reasoning": "Thin evidence.",
+        })
+        responses = [
+            json.dumps({"subtasks": [
+                {"description": "Write report", "assigned_to": "writer", "depends_on": []},
+            ]}),
+        ] + ["Draft", rejection] * 50
+        orchestrator = OrchestratorAgent(provider=MockProvider(responses=responses),
+                                         max_revisions=3)
+
+        result = await orchestrator.run("Write a report", max_iterations=20)
+
+        assert result.status == TaskStatus.COMPLETED
+        assert result.iteration_count == 3
+        assert len(result.reviews) == 3
+        assert all(not review.approved for review in result.reviews)
+        assert any("Accepted after 3 revisions" in e for e in result.errors)
+        assert any("Needs more sources" in e for e in result.errors)
 
 
 @pytest.mark.parametrize("items", [

@@ -80,6 +80,7 @@ class SubTask(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     depends_on: list[str] = Field(default_factory=list, description="IDs of subtasks this depends on")
     result_artifact_id: Optional[str] = None
+    revision_count: int = 0
 
 
 class TaskPlan(BaseModel):

@@ -55,12 +55,14 @@ class OrchestratorAgent(BaseAgent):
         researcher: ResearcherAgent | None = None,
         writer: WriterAgent | None = None,
         reviewer: ReviewerAgent | None = None,
+        max_revisions: int = 3,
         **kwargs,
     ) -> None:
         super().__init__(provider, **kwargs)
         self._researcher = researcher or ResearcherAgent(provider)
         self._writer = writer or WriterAgent(provider)
         self._reviewer = reviewer or ReviewerAgent(provider)
+        self._max_revisions = max(1, max_revisions)
 
     @property
     def system_prompt(self) -> str:
@@ -249,9 +251,26 @@ Rules:
                 state.errors.append("Reviewer returned no verdict for the current draft.")
                 return state.model_dump()
             verdict = state.reviews[-1]
-            subtask.status = TaskStatus.COMPLETED if verdict.approved else TaskStatus.REJECTED
-            message = "Draft approved" if verdict.approved else "Draft rejected"
-            publish(state, "review_complete", message, approved=verdict.approved,
+            if verdict.approved:
+                subtask.status = TaskStatus.COMPLETED
+                message = "Draft approved"
+            else:
+                subtask.revision_count += 1
+                # Break stagnation: once this subtask has burned through the
+                # revision budget, accept the latest draft and surface the
+                # unresolved issues on the task audit instead of looping until
+                # the global iteration cap.
+                if subtask.revision_count >= self._max_revisions:
+                    subtask.status = TaskStatus.COMPLETED
+                    note = (f"Accepted after {subtask.revision_count} revisions. "
+                            f"Unresolved reviewer concerns: "
+                            f"{'; '.join(verdict.issues) or verdict.reasoning or 'quality below threshold'}")
+                    state.errors.append(note)
+                    message = note
+                else:
+                    subtask.status = TaskStatus.REJECTED
+                    message = "Draft rejected"
+            publish(state, "review_complete", message, approved=subtask.status == TaskStatus.COMPLETED,
                     reasoning=verdict.reasoning, issues=verdict.issues)
             publish(state, "agent_completed", "Finished reviewing the draft")
             return state.model_dump()
