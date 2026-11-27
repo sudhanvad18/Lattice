@@ -72,7 +72,7 @@ export interface Artifact {
 export interface AgentEvent {
   timestamp: string;
   agent: string;
-  event_type: "started" | "completed" | "error" | "tool_call" | "llm_call";
+  event_type: "started" | "completed" | "task_complete" | "error" | "tool_call" | "llm_call";
   details: string;
   task_id: string;
 }
@@ -445,14 +445,10 @@ function mapEventType(event: string): AgentEvent["event_type"] {
     return "error";
   if (event === "llm_call") return "llm_call";
   if (event === "tool_call") return "tool_call";
-  if (
-    event === "task_complete" ||
-    event === "task_completed" ||
-    event === "agent_completed" ||
-    event.endsWith("_complete") ||
-    event.endsWith("_completed")
-  )
-    return "completed";
+  // Only task_complete/task_completed are terminal; agent_completed and other
+  // _complete/_completed events are intermediate informational events.
+  if (event === "task_complete" || event === "task_completed") return "task_complete";
+  if (event.endsWith("_complete") || event.endsWith("_completed")) return "completed";
   return "started";
 }
 
