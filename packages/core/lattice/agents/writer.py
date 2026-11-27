@@ -54,7 +54,9 @@ Output the document content directly. Do NOT wrap in JSON."""
                     subtask = st
                     break
 
-        # Gather research artifacts as context
+        # Gather research artifacts as context. The newest brief goes first so
+        # repair evidence from a prior rejection isn't buried below the stale
+        # original research.
         research_artifacts = state.get_artifacts_by_type("research")
         citation_aliases = {}
         if not research_artifacts:
@@ -62,16 +64,28 @@ Output the document content directly. Do NOT wrap in JSON."""
             # Still attempt to write, but note the lack of research
             context = "No research artifacts available. Generate based on task description alone."
         else:
+            ordered = list(reversed(research_artifacts))
             context_parts = ["## Research Findings\n"]
-            for i, art in enumerate(research_artifacts):
-                context_parts.append(f"### Research Brief {i + 1} (confidence: {art.confidence:.2f})")
+            for i, art in enumerate(ordered):
+                label = "Latest research (use these passages first)" if i == 0 else f"Research Brief {i}"
+                context_parts.append(f"### {label} (confidence: {art.confidence:.2f})")
                 context_parts.append(art.content)
                 if implementation_brief(task):
                     context_parts.append("Retrieved source excerpts (cite the bracketed labels):")
                     for evidence in art.metadata.get("evidence", []):
-                        label = f"S{len(citation_aliases) + 1}"
-                        citation_aliases[label] = evidence["id"]
-                        context_parts.append(f"[{label}] {evidence['source']}\n{evidence['excerpt']}")
+                        key = f"S{len(citation_aliases) + 1}"
+                        citation_aliases[key] = evidence["id"]
+                        context_parts.append(f"[{key}] {evidence['source']}\n{evidence['excerpt']}")
+            if implementation_brief(task) and citation_aliases:
+                # Explicit cheat sheet: pair each retrieved file with its label
+                # and the real source_id to write into the brief.
+                evidence_by_id = {ev["id"]: ev for art in ordered
+                                  for ev in art.metadata.get("evidence", [])}
+                context_parts.append("\n## Files you may cite (use the exact bracket label)")
+                for key, source_id in citation_aliases.items():
+                    source = evidence_by_id.get(source_id, {}).get("source")
+                    if source:
+                        context_parts.append(f"- {source} → [{key}]")
             context = "\n".join(context_parts)
 
         # If there was a previous rejection, include the previous draft so the

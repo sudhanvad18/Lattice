@@ -227,8 +227,11 @@ Rules:
                      else self._writer)
             if subtask.revision_count and implementation_brief(state.original_task):
                 verdict = state.reviews[-1]
-                question = " ".join([*verdict.issues, *verdict.suggestions])
-                if any(term in question.casefold() for term in ("source", "evidence", "project file")):
+                question = " ".join([*verdict.issues, *verdict.suggestions, verdict.reasoning])
+                # Any concern that points at ungrounded content earns another retrieval.
+                trigger = ("source", "evidence", "project file", "placeholder",
+                           "invent", "fabricat", "does not exist", "missing", "citation")
+                if any(term in question.casefold() for term in trigger):
                     start(state, AgentRole.RESEARCHER, "Looking up evidence for the requested repair")
                     extra = self._researcher.lookup_review_evidence(state, question)
                     if extra:
