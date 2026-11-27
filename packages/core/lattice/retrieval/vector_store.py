@@ -85,6 +85,7 @@ class VectorStore:
         top_k: int = 5,
         filter_document_id: Optional[str] = None,
         filter_doc_type: Optional[str] = None,
+        filter_source: str | None = None,
     ) -> list[SearchResult]:
         """Search for chunks similar to the query.
 
@@ -95,11 +96,16 @@ class VectorStore:
             where_filter["document_id"] = filter_document_id
         if filter_doc_type:
             where_filter["doc_type"] = filter_doc_type
+        if filter_source:
+            where_filter["source"] = filter_source
+        where = where_filter or None
+        if len(where_filter) > 1:
+            where = {"$and": [{key: value} for key, value in where_filter.items()]}
 
         results = self._collection.query(
             query_texts=[query],
             n_results=top_k,
-            where=where_filter if where_filter else None,
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
 

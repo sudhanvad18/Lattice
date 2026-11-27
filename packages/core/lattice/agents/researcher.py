@@ -16,6 +16,8 @@ into a richer research brief.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -68,9 +70,13 @@ Your output MUST be a JSON object with this structure:
     "confidence": 0.0-1.0
 }
 
-IMPORTANT: Use tools to search for information BEFORE writing your research brief.
-Multiple searches with different queries will give you better coverage.
-Be thorough but concise. Focus on RELEVANCE to the task at hand."""
+Use tools when they are available. Otherwise use only the provided knowledge-base passages.
+Do not claim a web search, external verification, or code execution that did not happen.
+For feature proposals, first identify this project's actual purpose and existing components
+from the sources. Separate documented facts from proposed additions. Never invent an existing
+API, integration or feature; flag missing evidence in gaps instead. Include source IDs for
+supported findings. A proposed design is not evidence of an existing capability.
+Be thorough but concise. Return only the requested JSON."""
 
     async def execute(self, state: AgentState) -> AgentState:
         """Execute research by querying vector store and KG (with tool loop)."""
@@ -91,14 +97,38 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
 
         if self._vector_store:
             vs_results = self._vector_store.search(query, top_k=self._top_k)
+            # Generic design requests often retrieve implementation fragments
+            # without the project's purpose. Anchor those requests in its README.
+            if any(word in task.casefold() for word in (
+                "feature", "this tool", "this project", "architecture", "purpose", "codebase",
+            )):
+                counts = getattr(self._vector_store, "source_counts", lambda: {})()
+                readmes = sorted(
+                    (source for source in counts if isinstance(source, str)
+                     and Path(source).name.casefold().startswith("readme")),
+                    key=lambda source: (len(Path(source).parts), len(source), source),
+                )
+                if readmes:
+                    overview = self._vector_store.search(
+                        "project purpose overview architecture existing capabilities",
+                        top_k=min(2, self._top_k), filter_source=readmes[0],
+                    )
+                    seen = set()
+                    combined = []
+                    for hit in [*overview, *vs_results]:
+                        if hit.chunk_id not in seen:
+                            seen.add(hit.chunk_id)
+                            combined.append(hit)
+                    vs_results = combined[:self._top_k]
             if vs_results:
                 context_parts.append("## Retrieved Documents\n")
                 for i, result in enumerate(vs_results):
                     chunk_id = getattr(result, "chunk_id", f"chunk_{i}")
                     content = getattr(result, "content", "")
                     similarity = getattr(result, "similarity", 0.0)
+                    source = (getattr(result, "metadata", {}) or {}).get("source", "unknown")
                     context_parts.append(
-                        f"[{chunk_id}] (relevance: {similarity:.2f})\n{content}\n"
+                        f"[{chunk_id}] Source: {source} (relevance: {similarity:.2f})\n{content}\n"
                     )
                     citations.append(chunk_id)
 
@@ -122,7 +152,10 @@ Be thorough but concise. Focus on RELEVANCE to the task at hand."""
                 if tr.success and tr.metadata.get("entity_ids"):
                     citations.extend(tr.metadata["entity_ids"])
         else:
-            result = await self._call_llm(user_msg, context=context)
+            result = await self._call_llm(
+                user_msg, context=context,
+                config=replace(self._config, temperature=0.1, json_output=True),
+            )
 
         # Parse response and create artifact
         confidence = self._extract_confidence(result.content)

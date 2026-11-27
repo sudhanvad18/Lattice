@@ -58,6 +58,22 @@ def sample_chunks() -> list[Chunk]:
 
 
 class TestVectorStore:
+    def test_source_filter_combines_with_document_and_type(self, vector_store, sample_chunks,
+                                                         monkeypatch):
+        from chromadb.api.models.CollectionCommon import CollectionCommon
+
+        monkeypatch.setattr(CollectionCommon, "_embed", lambda self, input, **kw: [
+            [1.0, float(len(text) % 17) / 17, 0.5] for text in input
+        ])
+        vector_store.add_chunks(sample_chunks)
+        results = vector_store.search(
+            "blade", top_k=10, filter_source="test.md", filter_document_id="doc-1",
+            filter_doc_type="markdown",
+        )
+        assert len(results) == 3
+        assert {result.metadata["source"] for result in results} == {"test.md"}
+        assert vector_store.search("blade", filter_source="missing.md") == []
+
     def test_add_chunks(self, vector_store: VectorStore, sample_chunks: list[Chunk]):
         count = vector_store.add_chunks(sample_chunks)
         assert count == 4

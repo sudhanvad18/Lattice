@@ -489,6 +489,40 @@ async def test_structured_agent_steps_request_json():
     assert all(config.json_output for config in provider.configs)
 
 
+async def test_feature_research_anchors_project_purpose_in_readme():
+    from lattice.retrieval.vector_store import SearchResult
+
+    overview = SearchResult("overview", "This is an authentication automation tool.",
+                            {"source": "/repo/README.md"}, 0.8)
+    fragment = SearchResult("implementation", "export function login() {}",
+                            {"source": "/repo/src/auth.ts"}, 0.7)
+
+    class Store:
+        def source_counts(self):
+            return {"/repo/docs/nested/README.md": 1, "/repo/README.md": 1}
+
+        def search(self, query, top_k=8, filter_source=None):
+            if filter_source:
+                assert filter_source == "/repo/README.md"
+                return [overview]
+            return [fragment, overview]
+
+    class Provider(MockProvider):
+        async def generate(self, messages, config=None):
+            assert config.json_output
+            return await super().generate(messages, config)
+
+    provider = Provider()
+    state = await ResearcherAgent(provider, vector_store=Store(), top_k=2).execute(
+        AgentState(original_task="Propose a novelty feature for this tool"),
+    )
+    prompt = provider.last_messages[1].content
+    assert prompt.index("authentication automation") < prompt.index("export function")
+    assert "Source: /repo/README.md" in prompt
+    assert prompt.count("authentication automation") == 1
+    assert set(state.artifacts[0].citations) == {"overview", "implementation"}
+
+
 async def test_long_plan_stops_at_dispatch_budget():
     plan = {"subtasks": [{"description": f"Section {i}", "assigned_to": "writer"}
                          for i in range(13)]}
